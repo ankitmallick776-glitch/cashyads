@@ -82,10 +82,35 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # Watch Ads handler (placeholder)
 async def handle_watch_ads(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    import random
+    user_id = update.effective_user.id
+    
+    ad_reward = random.randint(3, 5)
+    
+    user_data[user_id]['balance'] += ad_reward
+    user_data[user_id]['ads_watched'] += 1
+    user_data[user_id]['total_earnings'] += ad_reward
+    
+    if user_id in referral_tree:
+        referrer_id = referral_tree[user_id]
+        commission = ad_reward * 0.05  # 5% commission
+        user_data[referrer_id]['balance'] += commission
+        user_data[referrer_id]['commission_earned'] += commission
+        
+        try:
+            await context.bot.send_message(
+                chat_id=referrer_id,
+                text=f"💵 Commission Alert!\n\n{update.effective_user.first_name} watched an ad!\nYou earned ₹{commission:.2f} (5% commission)\n\nNew Balance: ₹{user_data[referrer_id]['balance']:.2f}"
+            )
+        except:
+            pass
+    
     await update.message.reply_text(
-        "💰 Watch Ads Feature\n\n"
-        "This feature will be configured next.\n"
-        "You'll be able to watch ads and earn money!",
+        f"🎉 Ad Watched Successfully!\n\n"
+        f"💰 You earned: ₹{ad_reward}\n"
+        f"💵 New Balance: ₹{user_data[user_id]['balance']:.2f}\n"
+        f"📺 Total Ads Watched: {user_data[user_id]['ads_watched']}\n\n"
+        f"Watch more ads to earn more! 🚀",
         reply_markup=create_main_keyboard()
     )
 
@@ -95,13 +120,17 @@ async def handle_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     balance = user_data[user_id]['balance']
     ads_watched = user_data[user_id]['ads_watched']
     referrals = user_data[user_id]['referrals']
+    total_earnings = user_data[user_id]['total_earnings']
+    commission_earned = user_data[user_id]['commission_earned']
     
     balance_message = f"""
 💵 Your Balance
 
-💰 Current Balance: ${balance:.2f}
+💰 Current Balance: ₹{balance:.2f}
 📺 Ads Watched: {ads_watched}
+💸 Ad Earnings: ₹{total_earnings:.2f}
 👥 Referrals: {referrals}
+💎 Commission Earned: ₹{commission_earned:.2f}
 
 Keep earning by watching ads and referring friends! 🚀
     """
@@ -116,18 +145,24 @@ async def handle_refer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     bot_username = context.bot.username
     referral_link = f"https://t.me/{bot_username}?start=ref_{user_id}"
+    commission_earned = user_data[user_id]['commission_earned']
     
     refer_message = f"""
 👥 Refer and Earn
 
-Share your referral link with friends and earn rewards!
+Share your referral link with friends and earn BIG rewards!
 
 🔗 Your Referral Link:
 {referral_link}
 
-💰 Earn $1.00 for each friend who joins!
+💰 Earn ₹50 when a friend joins!
+📈 Get 5% commission on every ad they watch!
 
-Total Referrals: {user_data[user_id]['referrals']}
+📊 Your Referral Stats:
+👥 Total Referrals: {user_data[user_id]['referrals']}
+💎 Commission Earned: ₹{commission_earned:.2f}
+
+Share now and start earning passive income! 🚀
     """
     
     await update.message.reply_text(
@@ -147,14 +182,14 @@ async def handle_bonus(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=create_main_keyboard()
         )
     else:
-        bonus_amount = 0.50
+        bonus_amount = 5.0
         user_data[user_id]['balance'] += bonus_amount
         user_data[user_id]['bonus_claimed'] = True
         
         await update.message.reply_text(
             f"🎉 Congratulations!\n\n"
-            f"You've claimed your daily bonus of ${bonus_amount:.2f}!\n"
-            f"New Balance: ${user_data[user_id]['balance']:.2f}\n\n"
+            f"You've claimed your daily bonus of ₹{bonus_amount:.2f}!\n"
+            f"New Balance: ₹{user_data[user_id]['balance']:.2f}\n\n"
             f"Come back tomorrow for more! 🌟",
             reply_markup=create_main_keyboard()
         )
