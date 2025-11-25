@@ -14,14 +14,68 @@ logger = logging.getLogger(__name__)
 user_data = {}
 
 # Initialize user data
-def init_user(user_id):
+referral_tree = {}
+
+def init_user(user_id, referrer_id=None):
     if user_id not in user_data:
         user_data[user_id] = {
             'balance': 0,
             'referrals': 0,
             'bonus_claimed': False,
-            'ads_watched': 0
+            'ads_watched': 0,
+            'total_earnings': 0,
+            'commission_earned': 0
         }
+        
+        if referrer_id and referrer_id != user_id and referrer_id in user_data:
+            referral_tree[user_id] = referrer_id
+            user_data[referrer_id]['referrals'] += 1
+            user_data[referrer_id]['balance'] += 50.0
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    user_id = user.id
+    
+    referrer_id = None
+    if context.args:
+        ref_arg = context.args[0]
+        if ref_arg.startswith('ref_'):
+            try:
+                referrer_id = int(ref_arg.split('ref_')[1])
+            except:
+                pass
+    
+    is_new_user = user_id not in user_data
+    init_user(user_id, referrer_id)
+    
+    if is_new_user and referrer_id and referrer_id in user_data:
+        try:
+            await context.bot.send_message(
+                chat_id=referrer_id,
+                text=f"🎉 New Referral!\n\n{user.first_name} joined using your link!\n💰 You earned ₹50.00\n\nNew Balance: ₹{user_data[referrer_id]['balance']:.2f}"
+            )
+        except:
+            pass
+    
+    welcome_message = f"""
+👋 Welcome to Money Making Bot, {user.first_name}!
+
+🌟 Start earning money with simple tasks!
+
+Here's what you can do:
+💰 Watch Ads - Earn ₹3-5 per ad
+💵 Balance - Check your current earnings
+👥 Refer and Earn - Get ₹50 + 5% commission per referral
+🎁 Bonus - Claim your daily ₹5 bonus
+⭐ Extra - Additional features and rewards
+
+Use the buttons below to get started! 🚀
+    """
+    
+    await update.message.reply_text(
+        welcome_message,
+        reply_markup=create_main_keyboard()
+    )
 
 # Create keyboard
 def create_main_keyboard():
