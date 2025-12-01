@@ -118,7 +118,6 @@ def can_claim_bonus(user_id: int) -> bool:
         last_bonus = user.get('last_bonus_date', '')
         
         if last_bonus != today:
-            # RESET for new day
             update_user_field(user_id, 'bonus_claimed', False)
             update_user_field(user_id, 'last_bonus_date', today)
             return True
@@ -184,7 +183,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     stats = get_user_stats(user_id)
     await update.message.reply_text(
         f"👋 Welcome {user.first_name}!\n\n"
-        f"💰 **CashyAds v7.3** (Production)\n\n"
+        f"💰 **CashyAds v7.4** (Production)\n\n"
         f"💵 Balance: ₹{stats['balance']:.2f}\n"
         f"👥 Referrals: {stats['referrals']}\n\n"
         f"🚀 Start earning now!",
@@ -202,7 +201,6 @@ async def handle_watch_ads(update: Update, context: ContextTypes.DEFAULT_TYPE):
     increment_field(user_id, 'total_earnings', ad_reward)
     increment_field(user_id, 'ads_watched', 1)
     
-    # Referral commission
     if stats['referrer_id']:
         commission = ad_reward * 0.05
         increment_field(stats['referrer_id'], 'balance', commission)
@@ -307,7 +305,7 @@ async def handle_extra(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode='Markdown'
     )
 
-# ✅ FIXED WITHDRAWAL CHECK - Now properly edits message
+# ✅ FIXED: Single query.answer() per callback
 async def handle_withdraw_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_id = query.from_user.id
@@ -317,22 +315,32 @@ async def handle_withdraw_check(update: Update, context: ContextTypes.DEFAULT_TY
     referrals_ok = stats['referrals'] >= 15
     
     if not balance_ok:
-        await query.answer(f"❌ Minimum ₹380 required!\nCurrent: ₹{stats['balance']:.2f}", show_alert=True)
-        await query.edit_message_text("💵 **Withdraw Requirements Not Met**\n\nNeed ₹380+ balance", reply_markup=create_main_keyboard())
+        await query.edit_message_text(
+            f"💵 **Withdraw Requirements Not Met**\n\n"
+            f"❌ Need ₹380+ balance\n"
+            f"💰 Current: ₹{stats['balance']:.2f}",
+            reply_markup=create_main_keyboard(),
+            parse_mode='Markdown'
+        )
+        await query.answer("Need ₹380+ balance", show_alert=True)
         return False
     
     if not referrals_ok:
         remaining = 15 - stats['referrals']
-        await query.answer(f"👥 {stats['referrals']}/15 referrals\nNeed {remaining} more!", show_alert=True)
-        await query.edit_message_text(f"💵 **Need {remaining} more referrals**\n\nMinimum 15 referrals required", reply_markup=create_main_keyboard())
+        await query.edit_message_text(
+            f"💵 **Need {remaining} more referrals**\n\n"
+            f"👥 Current: {stats['referrals']}/15 required",
+            reply_markup=create_main_keyboard(),
+            parse_mode='Markdown'
+        )
+        await query.answer(f"Need {remaining} more referrals", show_alert=True)
         return False
     
-    # ✅ SHOW METHOD SELECTION
+    # ✅ SUCCESS - Show methods
     withdraw_kb = create_withdraw_keyboard()
     await query.edit_message_text("💳 **Select Withdraw Method**", reply_markup=withdraw_kb, parse_mode='Markdown')
     return True
 
-# ✅ FIXED WITHDRAW METHOD - Proper message editing
 async def handle_withdraw_method(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     data = query.data
@@ -349,7 +357,6 @@ async def handle_withdraw_method(update: Update, context: ContextTypes.DEFAULT_T
     user_id = query.from_user.id
     stats = get_user_stats(user_id)
     
-    # Store withdraw intent - DEDUCT LATER after details
     context.user_data['awaiting_withdraw_details'] = True
     context.user_data['withdraw_method'] = method
     context.user_data['withdraw_amount'] = stats['balance']
@@ -359,17 +366,15 @@ async def handle_withdraw_method(update: Update, context: ContextTypes.DEFAULT_T
         f"💰 Amount: `₹{stats['balance']:.2f}`\n"
         f"💳 Method: **{method}**\n\n"
         f"📝 **Send your {method} details right now:**\n"
-        f"`yourupi@paytm` or `bank details` or `wallet address`\n\n"
-        f"⏰ Processing: 6-7 working days",
+        f"`yourupi@paytm` or `bank details` or `wallet address`",
         parse_mode='Markdown',
         reply_markup=None
     )
     await query.answer(f"{method} selected! Send details now.")
 
-# ✅ FIXED MAIN CALLBACK HANDLER
+# ✅ CRITICAL FIX: NO query.answer() here - handlers manage it
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
     
     if query.data == "show_withdraw":
         await handle_withdraw_check(update, context)
@@ -382,12 +387,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text
     
-    # ✅ WITHDRAW DETAILS RECEIVED - NOW DEDUCT
     if context.user_data.get('awaiting_withdraw_details'):
         method = context.user_data.get('withdraw_method', 'UPI')
         amount = context.user_data.get('withdraw_amount', 0)
         
-        # DEDUCT NOW - safe after details received
         increment_field(user_id, 'balance', -amount)
         create_transaction(user_id, 'withdraw', -amount, f"{method}: {text}")
         
@@ -404,7 +407,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
-    # BUTTON HANDLERS
     if text == "💰 Watch Ads":
         await handle_watch_ads(update, context)
     elif text == "💵 Balance":
@@ -421,11 +423,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("👇 Use the buttons below!", reply_markup=create_main_keyboard())
 
 def main():
-    logger.info("🤖 CashyAds v7.3 - Starting...")
+    logger.info("🤖 CashyAds v7.4 - Starting...")
     
     app = Application.builder().token(BOT_TOKEN).build()
     
-    # Handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
