@@ -184,7 +184,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     stats = get_user_stats(user_id)
     await update.message.reply_text(
         f"👋 Welcome {user.first_name}!\n\n"
-        f"💰 **CashyAds v7.2** (Production)\n\n"
+        f"💰 **CashyAds v7.3** (Production)\n\n"
         f"💵 Balance: ₹{stats['balance']:.2f}\n"
         f"👥 Referrals: {stats['referrals']}\n\n"
         f"🚀 Start earning now!",
@@ -307,8 +307,7 @@ async def handle_extra(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode='Markdown'
     )
 
-    # REPLACE the withdraw functions with these FIXED versions:
-
+# ✅ FIXED WITHDRAWAL CHECK - Now properly edits message
 async def handle_withdraw_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_id = query.from_user.id
@@ -319,20 +318,21 @@ async def handle_withdraw_check(update: Update, context: ContextTypes.DEFAULT_TY
     
     if not balance_ok:
         await query.answer(f"❌ Minimum ₹380 required!\nCurrent: ₹{stats['balance']:.2f}", show_alert=True)
-        await query.edit_message_text("💵 **Withdraw Requirements Not Met**", reply_markup=create_main_keyboard())
+        await query.edit_message_text("💵 **Withdraw Requirements Not Met**\n\nNeed ₹380+ balance", reply_markup=create_main_keyboard())
         return False
     
     if not referrals_ok:
         remaining = 15 - stats['referrals']
         await query.answer(f"👥 {stats['referrals']}/15 referrals\nNeed {remaining} more!", show_alert=True)
-        await query.edit_message_text("💵 **Withdraw Requirements Not Met**", reply_markup=create_main_keyboard())
+        await query.edit_message_text(f"💵 **Need {remaining} more referrals**\n\nMinimum 15 referrals required", reply_markup=create_main_keyboard())
         return False
     
-    # ✅ FIXED: Show method selection
+    # ✅ SHOW METHOD SELECTION
     withdraw_kb = create_withdraw_keyboard()
     await query.edit_message_text("💳 **Select Withdraw Method**", reply_markup=withdraw_kb, parse_mode='Markdown')
     return True
 
+# ✅ FIXED WITHDRAW METHOD - Proper message editing
 async def handle_withdraw_method(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     data = query.data
@@ -349,7 +349,7 @@ async def handle_withdraw_method(update: Update, context: ContextTypes.DEFAULT_T
     user_id = query.from_user.id
     stats = get_user_stats(user_id)
     
-    # Store withdraw intent
+    # Store withdraw intent - DEDUCT LATER after details
     context.user_data['awaiting_withdraw_details'] = True
     context.user_data['withdraw_method'] = method
     context.user_data['withdraw_amount'] = stats['balance']
@@ -366,7 +366,7 @@ async def handle_withdraw_method(update: Update, context: ContextTypes.DEFAULT_T
     )
     await query.answer(f"{method} selected! Send details now.")
 
-# FIXED button_callback - handle ALL withdraw cases
+# ✅ FIXED MAIN CALLBACK HANDLER
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -377,6 +377,32 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_withdraw_method(update, context)
     else:
         await query.answer("Use main menu buttons!")
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    text = update.message.text
+    
+    # ✅ WITHDRAW DETAILS RECEIVED - NOW DEDUCT
+    if context.user_data.get('awaiting_withdraw_details'):
+        method = context.user_data.get('withdraw_method', 'UPI')
+        amount = context.user_data.get('withdraw_amount', 0)
+        
+        # DEDUCT NOW - safe after details received
+        increment_field(user_id, 'balance', -amount)
+        create_transaction(user_id, 'withdraw', -amount, f"{method}: {text}")
+        
+        context.user_data.clear()
+        
+        await update.message.reply_text(
+            f"📝 **{method} details received!**\n\n"
+            f"✅ Withdrawal **successful**!\n"
+            f"💰 Amount: `₹{amount:.2f}`\n"
+            f"⏰ Processing within **6-7 working days**.\n\n"
+            f"🚀 Keep earning more!",
+            reply_markup=create_main_keyboard(),
+            parse_mode='Markdown'
+        )
+        return
     
     # BUTTON HANDLERS
     if text == "💰 Watch Ads":
@@ -395,7 +421,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("👇 Use the buttons below!", reply_markup=create_main_keyboard())
 
 def main():
-    logger.info("🤖 CashyAds v7.2 - Starting...")
+    logger.info("🤖 CashyAds v7.3 - Starting...")
     
     app = Application.builder().token(BOT_TOKEN).build()
     
