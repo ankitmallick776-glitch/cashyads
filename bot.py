@@ -8,27 +8,43 @@ from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboard
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 from supabase import create_client, Client
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
+# STRICT VALIDATION - No env = no start
+BOT_TOKEN = os.getenv('BOT_TOKEN')
 SUPABASE_URL = os.getenv('SUPABASE_URL')
 SUPABASE_ANON_KEY = os.getenv('SUPABASE_ANON_KEY')
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
+
+if not all([BOT_TOKEN, SUPABASE_URL, SUPABASE_ANON_KEY]):
+    print("❌ ERROR: Missing .env variables (BOT_TOKEN, SUPABASE_URL, SUPABASE_ANON_KEY)")
+    exit(1)
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# SAFE SUPABASE CLIENT
+try:
+    supabase: Client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
+    logger.info("✅ Supabase connected")
+except Exception as e:
+    logger.error(f"❌ Supabase failed: {e}")
+    exit(1)
 
 def get_user(user_id: int):
-    response = supabase.table('users').select('*').eq('id', user_id).execute()
-    return response.data[0] if response.data else None
+    try:
+        response = supabase.table('users').select('*').eq('id', user_id).execute()
+        return response.data[0] if response.data else None
+    except:
+        return None
 
 def create_user(user_id: int, first_name: str, username: str = None, referrer_id: int = None):
     user_data = {
         'id': user_id,
         'telegram_username': username,
         'first_name': first_name,
-        'balance': 0,
+        'balance': 0.0,
         'referrals': 0,
         'ads_watched': 0,
-        'total_earnings': 0,
-        'commission_earned': 0,
+        'total_earnings': 0.0,
+        'commission_earned': 0.0,
         'bonus_claimed': False,
         'last_bonus_date': None,
         'referrer_id': referrer_id,
@@ -37,20 +53,23 @@ def create_user(user_id: int, first_name: str, username: str = None, referrer_id
     supabase.table('users').insert(user_data).execute()
     
     if referrer_id:
-        referrer = get_user(referrer_id)
-        if referrer:
-            supabase.table('users').update({
-                'referrals': referrer.get('referrals', 0) + 1,
-                'balance': referrer.get('balance', 0) + 50.0
-            }).eq('id', referrer_id).execute()
-            
-            supabase.table('transactions').insert({
-                'user_id': referrer_id,
-                'type': 'referral_signup',
-                'amount': 50.0,
-                'description': f"New referral: {first_name}",
-                'created_at': datetime.utcnow().isoformat()
-            }).execute()
+        try:
+            referrer = get_user(referrer_id)
+            if referrer:
+                supabase.table('users').update({
+                    'referrals': referrer['referrals'] + 1,
+                    'balance': referrer['balance'] + 50.0
+                }).eq('id', referrer_id).execute()
+                
+                supabase.table('transactions').insert({
+                    'user_id': referrer_id,
+                    'type': 'referral_signup',
+                    'amount': 50.0,
+                    'description': f"New referral: {first_name}",
+                    'created_at': datetime.utcnow().isoformat()
+                }).execute()
+        except Exception as e:
+            logger.error(f"Referral bonus failed: {e}")
 
 def get_user_stats(user_id: int):
     user = get_user(user_id)
@@ -72,40 +91,53 @@ def get_user_stats(user_id: int):
     }
 
 def update_user_field(user_id: int, field: str, value):
-    supabase.table('users').update({field: value}).eq('id', user_id).execute()
+    try:
+        supabase.table('users').update({field: value}).eq('id', user_id).execute()
+    except Exception as e:
+        logger.error(f"Update field failed: {e}")
 
 def increment_field(user_id: int, field: str, amount: float = 1):
-    user = get_user(user_id)
-    if user:
-        current = float(user.get(field, 0))
-        new_value = current + amount
-        supabase.table('users').update({field: new_value}).eq('id', user_id).execute()
-        return new_value
+    try:
+        user = get_user(user_id)
+        if user:
+            current = float(user.get(field, 0))
+            new_value = current + amount
+            supabase.table('users').update({field: new_value}).eq('id', user_id).execute()
+            return new_value
+    except Exception as e:
+        logger.error(f"Increment failed: {e}")
     return 0
 
 def can_claim_bonus(user_id: int) -> bool:
-    user = get_user(user_id)
-    if not user:
+    try:
+        user = get_user(user_id)
+        if not user:
+            return False
+        
+        today = date.today().isoformat()
+        last_bonus = user.get('last_bonus_date', '')
+        
+        if last_bonus != today:
+            # RESET for new day
+            update_user_field(user_id, 'bonus_claimed', False)
+            update_user_field(user_id, 'last_bonus_date', today)
+            return True
+        
+        return not user.get('bonus_claimed', False)
+    except:
         return False
-    
-    last_bonus_date = user.get('last_bonus_date')
-    today = date.today().isoformat()
-    
-    if not last_bonus_date or last_bonus_date != today:
-        update_user_field(user_id, 'bonus_claimed', False)
-        update_user_field(user_id, 'last_bonus_date', today)
-        return True
-    
-    return not user.get('bonus_claimed', False)
 
 def create_transaction(user_id: int, trans_type: str, amount: float, description: str):
-    supabase.table('transactions').insert({
-        'user_id': user_id,
-        'type': trans_type,
-        'amount': amount,
-        'description': description,
-        'created_at': datetime.utcnow().isoformat()
-    }).execute()
+    try:
+        supabase.table('transactions').insert({
+            'user_id': user_id,
+            'type': trans_type,
+            'amount': amount,
+            'description': description,
+            'created_at': datetime.utcnow().isoformat()
+        }).execute()
+    except Exception as e:
+        logger.error(f"Transaction failed: {e}")
 
 def create_main_keyboard():
     keyboard = [
@@ -146,14 +178,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             pass
     
-    existing = get_user(user_id)
-    if not existing:
+    if not get_user(user_id):
         create_user(user_id, user.first_name, user.username, referrer_id)
     
     stats = get_user_stats(user_id)
     await update.message.reply_text(
         f"👋 Welcome {user.first_name}!\n\n"
-        f"💰 **CashyAds v7.1** (Production)\n\n"
+        f"💰 **CashyAds v7.2** (Production)\n\n"
         f"💵 Balance: ₹{stats['balance']:.2f}\n"
         f"👥 Referrals: {stats['referrals']}\n\n"
         f"🚀 Start earning now!",
@@ -171,11 +202,13 @@ async def handle_watch_ads(update: Update, context: ContextTypes.DEFAULT_TYPE):
     increment_field(user_id, 'total_earnings', ad_reward)
     increment_field(user_id, 'ads_watched', 1)
     
+    # Referral commission
     if stats['referrer_id']:
         commission = ad_reward * 0.05
         increment_field(stats['referrer_id'], 'balance', commission)
         increment_field(stats['referrer_id'], 'commission_earned', commission)
-        create_transaction(stats['referrer_id'], 'commission', commission, f"{update.effective_user.first_name} watched ad")
+        create_transaction(stats['referrer_id'], 'commission', commission, 
+                          f"{update.effective_user.first_name} watched ad")
     
     create_transaction(user_id, 'ad', ad_reward, f"Ad reward (₹{ad_reward})")
     
@@ -247,14 +280,17 @@ async def handle_bonus(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 async def handle_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    response = supabase.table('users').select('first_name, balance').order('balance', desc=True).limit(10).execute()
-    leaderboard = response.data
-    
-    msg = "🏆 **TOP 10 Richest Users**\n\n"
-    for i, user in enumerate(leaderboard, 1):
-        msg += f"{i}. {user['first_name']} - ₹{float(user['balance']):.2f}\n"
-    
-    await update.message.reply_text(msg + "\n👆 Be #1! 🚀", parse_mode='Markdown', reply_markup=create_main_keyboard())
+    try:
+        response = supabase.table('users').select('first_name, balance').order('balance', desc=True).limit(10).execute()
+        leaderboard = response.data
+        
+        msg = "🏆 **TOP 10 Richest Users**\n\n"
+        for i, user in enumerate(leaderboard, 1):
+            msg += f"{i}. {user['first_name']} - ₹{float(user['balance']):.2f}\n"
+        
+        await update.message.reply_text(msg + "\n👆 Be #1! 🚀", parse_mode='Markdown', reply_markup=create_main_keyboard())
+    except:
+        await update.message.reply_text("Leaderboard temporarily unavailable!", reply_markup=create_main_keyboard())
 
 async def handle_extra(update: Update, context: ContextTypes.DEFAULT_TYPE):
     stats = get_user_stats(update.effective_user.id)
@@ -271,7 +307,7 @@ async def handle_extra(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode='Markdown'
     )
 
-# ✅ FIXED CALLBACK HANDLERS
+# WITHDRAWAL CHECK (min ₹380 + 15 referrals)
 async def handle_withdraw_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_id = query.from_user.id
@@ -292,43 +328,37 @@ async def handle_withdraw_check(update: Update, context: ContextTypes.DEFAULT_TY
     await query.edit_message_text("💳 **Select Withdraw Method**", reply_markup=withdraw_kb, parse_mode='Markdown')
     return True
 
+# WITHDRAW METHOD SELECTED
 async def handle_withdraw_method(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     data = query.data
     
-    if data == "withdraw_cancel":
-        await query.edit_message_text("💸 Withdraw cancelled!", reply_markup=create_main_keyboard())
+    if data == "withdraw_cancel" or data == "back_main":
+        await query.edit_message_text("🔙 Back to main menu!", reply_markup=create_main_keyboard())
         return
     
-    if data == "back_main":
-        await query.edit_message_text("🔙 Back to main menu!", reply_markup=create_main_keyboard())
+    if not data.startswith("withdraw_"):
         return
     
     method = data.split('_')[1].upper()
     user_id = query.from_user.id
     stats = get_user_stats(user_id)
     
-    # Deduct full balance
-    withdraw_amount = stats['balance']
-    increment_field(user_id, 'balance', -withdraw_amount)
-    create_transaction(user_id, 'withdraw', -withdraw_amount, f"Withdraw via {method}")
+    # STORE withdraw intent - DEDUCT LATER after details
+    context.user_data['awaiting_withdraw_details'] = True
+    context.user_data['withdraw_method'] = method
+    context.user_data['withdraw_amount'] = stats['balance']
     
     await query.edit_message_text(
-        f"✅ **Withdrawal Initiated!**\n\n"
-        f"💰 Amount: `₹{withdraw_amount:.2f}`\n"
+        f"✅ **Withdrawal Request Created!**\n\n"
+        f"💰 Amount: `₹{stats['balance']:.2f}`\n"
         f"💳 Method: **{method}**\n\n"
         f"📝 **Send your {method} details:**\n"
         f"`yourupi@paytm` or `bank details` or `wallet address`\n\n"
-        f"⏰ **Processing: 6-7 working days**\n"
-        f"⚠️ May take longer on holidays.",
+        f"⏰ **Processing: 6-7 working days**",
         parse_mode='Markdown',
         reply_markup=None
     )
-    
-    # Set user state for next message
-    context.user_data['awaiting_withdraw_details'] = True
-    context.user_data['withdraw_method'] = method
-    context.user_data['withdraw_amount'] = withdraw_amount
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -336,20 +366,23 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if query.data == "show_withdraw":
         await handle_withdraw_check(update, context)
-    elif query.data.startswith("withdraw_") or query.data == "withdraw_cancel" or query.data == "back_main":
+    elif query.data.startswith("withdraw_") or query.data in ["withdraw_cancel", "back_main"]:
         await handle_withdraw_method(update, context)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text
     
-    # Check if awaiting withdraw details
+    # ✅ WITHDRAW DETAILS RECEIVED - NOW DEDUCT
     if context.user_data.get('awaiting_withdraw_details'):
         method = context.user_data.get('withdraw_method', 'UPI')
         amount = context.user_data.get('withdraw_amount', 0)
         
-        create_transaction(user_id, 'withdraw_details', 0, f"{method} details: {text}")
-        context.user_data.clear()  # Reset state
+        # DEDUCT NOW - safe after details
+        increment_field(user_id, 'balance', -amount)
+        create_transaction(user_id, 'withdraw', -amount, f"{method}: {text}")
+        
+        context.user_data.clear()
         
         await update.message.reply_text(
             f"📝 **{method} details received!**\n\n"
@@ -362,7 +395,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
-    # Regular button handling
+    # BUTTON HANDLERS
     if text == "💰 Watch Ads":
         await handle_watch_ads(update, context)
     elif text == "💵 Balance":
@@ -379,17 +412,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("👇 Use the buttons below!", reply_markup=create_main_keyboard())
 
 def main():
-    if not all([os.getenv('BOT_TOKEN'), SUPABASE_URL, SUPABASE_ANON_KEY]):
-        logger.error("Missing env vars!")
-        return
+    logger.info("🤖 CashyAds v7.2 - Starting...")
     
-    app = Application.builder().token(os.getenv('BOT_TOKEN')).build()
+    app = Application.builder().token(BOT_TOKEN).build()
+    
+    # Handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    logger.info("🤖 CashyAds v7.1 Started - ALL BUGS FIXED!")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    logger.info("✅ Bot handlers registered - Running...")
+    app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
     main()
