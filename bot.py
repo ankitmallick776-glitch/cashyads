@@ -37,34 +37,39 @@ def create_user(user_id: int, first_name: str, username: str = None, referrer_id
     supabase.table('users').insert(user_data).execute()
     
     if referrer_id:
-        referrer_stats = get_user_stats(referrer_id)
-        supabase.table('users').update({
-            'referrals': referrer_stats['referrals'] + 1,
-            'balance': referrer_stats['balance'] + 50.0
-        }).eq('id', referrer_id).execute()
-        
-        supabase.table('transactions').insert({
-            'user_id': referrer_id,
-            'type': 'referral_signup',
-            'amount': 50.0,
-            'description': f"New referral: {first_name}",
-            'created_at': datetime.utcnow().isoformat()
-        }).execute()
+        referrer = get_user(referrer_id)
+        if referrer:
+            supabase.table('users').update({
+                'referrals': referrer.get('referrals', 0) + 1,
+                'balance': referrer.get('balance', 0) + 50.0
+            }).eq('id', referrer_id).execute()
+            
+            supabase.table('transactions').insert({
+                'user_id': referrer_id,
+                'type': 'referral_signup',
+                'amount': 50.0,
+                'description': f"New referral: {first_name}",
+                'created_at': datetime.utcnow().isoformat()
+            }).execute()
 
 def get_user_stats(user_id: int):
     user = get_user(user_id)
     if user:
         return {
-            'balance': user.get('balance', 0),
-            'referrals': user.get('referrals', 0),
-            'ads_watched': user.get('ads_watched', 0),
-            'total_earnings': user.get('total_earnings', 0),
-            'commission_earned': user.get('commission_earned', 0),
+            'balance': float(user.get('balance', 0)),
+            'referrals': int(user.get('referrals', 0)),
+            'ads_watched': int(user.get('ads_watched', 0)),
+            'total_earnings': float(user.get('total_earnings', 0)),
+            'commission_earned': float(user.get('commission_earned', 0)),
             'bonus_claimed': user.get('bonus_claimed', False),
             'last_bonus_date': user.get('last_bonus_date'),
             'referrer_id': user.get('referrer_id')
         }
-    return {}
+    return {
+        'balance': 0.0, 'referrals': 0, 'ads_watched': 0,
+        'total_earnings': 0.0, 'commission_earned': 0.0,
+        'bonus_claimed': False, 'last_bonus_date': None, 'referrer_id': None
+    }
 
 def update_user_field(user_id: int, field: str, value):
     supabase.table('users').update({field: value}).eq('id', user_id).execute()
@@ -72,7 +77,7 @@ def update_user_field(user_id: int, field: str, value):
 def increment_field(user_id: int, field: str, amount: float = 1):
     user = get_user(user_id)
     if user:
-        current = user.get(field, 0)
+        current = float(user.get(field, 0))
         new_value = current + amount
         supabase.table('users').update({field: new_value}).eq('id', user_id).execute()
         return new_value
@@ -124,9 +129,9 @@ def create_withdraw_keyboard():
 
 def create_extra_keyboard():
     keyboard = [
-        [InlineKeyboardButton("📢 Main Channel", url="https://t.me/your_channel")],
-        [InlineKeyboardButton("💬 Support", url="https://t.me/your_support")],
-        [InlineKeyboardButton("🔙 Main Menu", callback_data="extra_back")]
+        [InlineKeyboardButton("📢 Main Channel", url="https://t.me/cashyads")],
+        [InlineKeyboardButton("💬 Support", url="https://t.me/cashyads_support")],
+        [InlineKeyboardButton("🔙 Main Menu", callback_data="back_main")]
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -144,19 +149,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     existing = get_user(user_id)
     if not existing:
         create_user(user_id, user.first_name, user.username, referrer_id)
-        if referrer_id:
-            try:
-                await context.bot.send_message(
-                    referrer_id, 
-                    f"🎉 NEW REFERRAL!\n\n{user.first_name} joined via your link!\n💰 +₹50 to your balance!"
-                )
-            except:
-                pass
     
     stats = get_user_stats(user_id)
     await update.message.reply_text(
         f"👋 Welcome {user.first_name}!\n\n"
-        f"💰 **CashyAds v7** (Production)\n\n"
+        f"💰 **CashyAds v7.1** (Production)\n\n"
         f"💵 Balance: ₹{stats['balance']:.2f}\n"
         f"👥 Referrals: {stats['referrals']}\n\n"
         f"🚀 Start earning now!",
@@ -167,10 +164,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_watch_ads(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     stats = get_user_stats(user_id)
-    
-    if not stats:
-        await update.message.reply_text("Please /start first!", reply_markup=create_main_keyboard())
-        return
     
     ad_reward = random.randint(3, 5)
     
@@ -210,7 +203,7 @@ async def handle_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def handle_refer(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    bot_username = context.bot.username
+    bot_username = (await context.bot.get_me()).username
     user_id = update.effective_user.id
     stats = get_user_stats(user_id)
     
@@ -241,14 +234,14 @@ async def handle_bonus(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🎉 **Daily Bonus Claimed!**\n\n"
             f"💰 **+₹5.00**\n"
             f"💵 **New Balance: ₹{stats['balance']:.2f}**\n\n"
-            f"✅ Comes back tomorrow at midnight UTC!",
+            f"✅ Comes back tomorrow!",
             reply_markup=create_main_keyboard(),
             parse_mode='Markdown'
         )
     else:
         await update.message.reply_text(
             "🎁 **Daily Bonus**\n\n"
-            "Already claimed today!\n⏰ Resets at midnight UTC\n\nKeep earning with ads & referrals! 🚀",
+            "Already claimed today!\n⏰ Resets at midnight UTC\n\nKeep earning!",
             reply_markup=create_main_keyboard(),
             parse_mode='Markdown'
         )
@@ -259,7 +252,7 @@ async def handle_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     msg = "🏆 **TOP 10 Richest Users**\n\n"
     for i, user in enumerate(leaderboard, 1):
-        msg += f"{i}. {user['first_name']} - ₹{user['balance']:.2f}\n"
+        msg += f"{i}. {user['first_name']} - ₹{float(user['balance']):.2f}\n"
     
     await update.message.reply_text(msg + "\n👆 Be #1! 🚀", parse_mode='Markdown', reply_markup=create_main_keyboard())
 
@@ -278,55 +271,64 @@ async def handle_extra(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode='Markdown'
     )
 
+# ✅ FIXED CALLBACK HANDLERS
 async def handle_withdraw_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
+    query = update.callback_query
+    user_id = query.from_user.id
     stats = get_user_stats(user_id)
     
     balance_ok = stats['balance'] >= 380
     referrals_ok = stats['referrals'] >= 15
     
     if not balance_ok:
-        await update.callback_query.answer(f"Minimum ₹380 required!", show_alert=True)
-        return
+        await query.answer(f"❌ Minimum ₹380 required!\nCurrent: ₹{stats['balance']:.2f}", show_alert=True)
+        return False
     if not referrals_ok:
         remaining = 15 - stats['referrals']
-        await update.callback_query.answer(f"{stats['referrals']}/15 referrals done!\nNeed {remaining} more friends!", show_alert=True)
-        return
+        await query.answer(f"👥 {stats['referrals']}/15 referrals\nNeed {remaining} more!", show_alert=True)
+        return False
     
     withdraw_kb = create_withdraw_keyboard()
-    await update.callback_query.edit_message_text(
-        "💳 **Select Withdraw Method**",
-        reply_markup=withdraw_kb,
-        parse_mode='Markdown'
-    )
+    await query.edit_message_text("💳 **Select Withdraw Method**", reply_markup=withdraw_kb, parse_mode='Markdown')
+    return True
 
 async def handle_withdraw_method(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    method = query.data.split('_')[1]
-    user_id = query.from_user.id
-    stats = get_user_stats(user_id)
+    data = query.data
     
-    if query.data == "withdraw_cancel":
+    if data == "withdraw_cancel":
         await query.edit_message_text("💸 Withdraw cancelled!", reply_markup=create_main_keyboard())
         return
     
-    await query.answer()
+    if data == "back_main":
+        await query.edit_message_text("🔙 Back to main menu!", reply_markup=create_main_keyboard())
+        return
     
+    method = data.split('_')[1].upper()
+    user_id = query.from_user.id
+    stats = get_user_stats(user_id)
+    
+    # Deduct full balance
     withdraw_amount = stats['balance']
     increment_field(user_id, 'balance', -withdraw_amount)
-    create_transaction(user_id, 'withdraw', -withdraw_amount, f"Withdraw via {method.upper()}")
+    create_transaction(user_id, 'withdraw', -withdraw_amount, f"Withdraw via {method}")
     
     await query.edit_message_text(
-        f"✅ **Withdrawal Successful!**\n\n"
+        f"✅ **Withdrawal Initiated!**\n\n"
         f"💰 Amount: `₹{withdraw_amount:.2f}`\n"
-        f"💳 Method: **{method.upper()}**\n\n"
-        f"📋 **Type your {method.upper()} details correctly:**\n"
+        f"💳 Method: **{method}**\n\n"
+        f"📝 **Send your {method} details:**\n"
         f"`yourupi@paytm` or `bank details` or `wallet address`\n\n"
-        f"⏰ You will get your money **within 6-7 working days**.\n"
-        f"⚠️ Note: Might take longer if holiday.",
+        f"⏰ **Processing: 6-7 working days**\n"
+        f"⚠️ May take longer on holidays.",
         parse_mode='Markdown',
         reply_markup=None
     )
+    
+    # Set user state for next message
+    context.user_data['awaiting_withdraw_details'] = True
+    context.user_data['withdraw_method'] = method
+    context.user_data['withdraw_amount'] = withdraw_amount
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -334,13 +336,33 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if query.data == "show_withdraw":
         await handle_withdraw_check(update, context)
-    elif query.data == "extra_back":
-        await query.edit_message_text("⭐ Extra menu closed!", reply_markup=create_main_keyboard())
-    elif query.data.startswith("withdraw_"):
+    elif query.data.startswith("withdraw_") or query.data == "withdraw_cancel" or query.data == "back_main":
         await handle_withdraw_method(update, context)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
     text = update.message.text
+    
+    # Check if awaiting withdraw details
+    if context.user_data.get('awaiting_withdraw_details'):
+        method = context.user_data.get('withdraw_method', 'UPI')
+        amount = context.user_data.get('withdraw_amount', 0)
+        
+        create_transaction(user_id, 'withdraw_details', 0, f"{method} details: {text}")
+        context.user_data.clear()  # Reset state
+        
+        await update.message.reply_text(
+            f"📝 **{method} details received!**\n\n"
+            f"✅ Withdrawal **successful**!\n"
+            f"💰 Amount: `₹{amount:.2f}`\n"
+            f"⏰ Processing within **6-7 working days**.\n\n"
+            f"🚀 Keep earning more!",
+            reply_markup=create_main_keyboard(),
+            parse_mode='Markdown'
+        )
+        return
+    
+    # Regular button handling
     if text == "💰 Watch Ads":
         await handle_watch_ads(update, context)
     elif text == "💵 Balance":
@@ -354,18 +376,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == "⭐ Extra":
         await handle_extra(update, context)
     else:
-        # Handle withdraw details
-        user_id = update.effective_user.id
-        stats = get_user_stats(user_id)
-        create_transaction(user_id, 'withdraw_details', 0, f"Details: {text}")
-        await update.message.reply_text(
-            f"📝 **Withdraw details received!**\n\n"
-            f"✅ Your withdrawal is **successful**!\n"
-            f"⏰ Processing within **6-7 working days**.\n\n"
-            f"Keep earning! 🚀",
-            reply_markup=create_main_keyboard(),
-            parse_mode='Markdown'
-        )
+        await update.message.reply_text("👇 Use the buttons below!", reply_markup=create_main_keyboard())
 
 def main():
     if not all([os.getenv('BOT_TOKEN'), SUPABASE_URL, SUPABASE_ANON_KEY]):
@@ -377,7 +388,7 @@ def main():
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    logger.info("🤖 CashyAds v7 Started - 5 BUTTONS + WITHDRAW!")
+    logger.info("🤖 CashyAds v7.1 Started - ALL BUGS FIXED!")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
