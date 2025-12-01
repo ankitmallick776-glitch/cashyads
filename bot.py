@@ -1,36 +1,24 @@
 import logging
 import os
 import random
-from datetime import datetime, timedelta
+from datetime import datetime, date, timedelta
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from supabase import create_client, Client
-import json
 
-# Enable logging
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Supabase connection
+# Supabase
 SUPABASE_URL = os.getenv('SUPABASE_URL')
-SUPABASE_KEY = os.getenv('SUPABASE_ANON_KEY')
-
-if not SUPABASE_URL or not SUPABASE_KEY:
-    logger.error("SUPABASE_URL and SUPABASE_ANON_KEY required!")
-    exit(1)
-
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+SUPABASE_ANON_KEY = os.getenv('SUPABASE_ANON_KEY')
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
 
 def get_user(user_id: int):
-    """Get or create user"""
     response = supabase.table('users').select('*').eq('id', user_id).execute()
     return response.data[0] if response.data else None
 
 def create_user(user_id: int, first_name: str, username: str = None, referrer_id: int = None):
-    """Create new user"""
     user_data = {
         'id': user_id,
         'telegram_username': username,
@@ -41,30 +29,27 @@ def create_user(user_id: int, first_name: str, username: str = None, referrer_id
         'total_earnings': 0,
         'commission_earned': 0,
         'bonus_claimed': False,
-        'referrer_id': referrer_id
+        'last_bonus_date': None,
+        'referrer_id': referrer_id,
+        'created_at': datetime.utcnow()
     }
-    
     supabase.table('users').insert(user_data).execute()
     
-    # Reward referrer
     if referrer_id:
+        referrer_stats = get_user_stats(referrer_id)
         supabase.table('users').update({
-            'referrals': supabase.rpc('increment_field', {'user_id': referrer_id, 'field': 'referrals'}),
-            'balance': supabase.rpc('increment_field_float', {'user_id': referrer_id, 'field': 'balance', 'amount': 50.0})
+            'referrals': referrer_stats['referrals'] + 1,
+            'balance': referrer_stats['balance'] + 50.0
         }).eq('id', referrer_id).execute()
         
-        # Add transaction
         supabase.table('transactions').insert({
             'user_id': referrer_id,
             'type': 'referral_signup',
             'amount': 50.0,
             'description': f"New referral: {first_name}"
         }).execute()
-    
-    logger.info(f"Created user {user_id}")
 
 def get_user_stats(user_id: int):
-    """Get complete user stats"""
     user = get_user(user_id)
     if user:
         return {
@@ -74,33 +59,54 @@ def get_user_stats(user_id: int):
             'total_earnings': user.get('total_earnings', 0),
             'commission_earned': user.get('commission_earned', 0),
             'bonus_claimed': user.get('bonus_claimed', False),
+            'last_bonus_date': user.get('last_bonus_date'),
             'referrer_id': user.get('referrer_id')
         }
     return {}
 
-def add_balance(user_id: int, amount: float, field: str = 'balance'):
-    """Add to user balance/field"""
-    supabase.table('users').update({field: supabase.rpc('increment_field_float', {'user_id': user_id, 'field': field, 'amount': amount})}).eq('id', user_id).execute()
+def update_user_field(user_id: int, field: str, value):
+    supabase.table('users').update({field: value}).eq('id', user_id).execute()
+
+def increment_field(user_id: int, field: str, amount: float = 1):
+    user = get_user(user_id)
+    if user:
+        current = user.get(field, 0)
+        new_value = current + amount
+        supabase.table('users').update({field: new_value}).eq('id', user_id).execute()
+        return new_value
+    return 0
+
+def can_claim_bonus(user_id: int) -> bool:
+    """v6 Fixed: Proper daily reset at midnight UTC"""
+    user = get_user(user_id)
+    if not user:
+        return False
+    
+    last_bonus_date = user.get('last_bonus_date')
+    today = date.today().isoformat()
+    
+    # Reset bonus if new day or never claimed
+    if not last_bonus_date or last_bonus_date != today:
+        update_user_field(user_id, 'bonus_claimed', False)
+        update_user_field(user_id, 'last_bonus_date', today)
+        return True
+    
+    return not user.get('bonus_claimed', False)
 
 def create_transaction(user_id: int, trans_type: str, amount: float, description: str):
-    """Log transaction"""
     supabase.table('transactions').insert({
         'user_id': user_id,
         'type': trans_type,
         'amount': amount,
-        'description': description
+        'description': description,
+        'created_at': datetime.utcnow()
     }).execute()
-
-def can_claim_bonus(user_id: int):
-    """Check if user can claim daily bonus (simple - reset daily at midnight UTC)"""
-    user = get_user(user_id)
-    return user and not user.get('bonus_claimed', False)
 
 def create_main_keyboard():
     keyboard = [
         [KeyboardButton("💰 Watch Ads"), KeyboardButton("💵 Balance")],
         [KeyboardButton("👥 Refer and Earn"), KeyboardButton("🎁 Bonus")],
-        [KeyboardButton("⭐ Extra")]
+        [KeyboardButton("⭐ Leaderboard"), KeyboardButton("📊 Stats")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
@@ -108,150 +114,137 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = user.id
     
-    # Parse referral
     referrer_id = None
     if context.args:
-        ref_arg = context.args[0]
-        if ref_arg.startswith('ref_'):
+        if context.args[0].startswith('ref_'):
             try:
-                referrer_id = int(ref_arg[4:])
+                referrer_id = int(context.args[0][4:])
             except:
                 pass
     
-    # Get or create user
-    existing_user = get_user(user_id)
-    if not existing_user:
+    existing = get_user(user_id)
+    if not existing:
         create_user(user_id, user.first_name, user.username, referrer_id)
-        
         if referrer_id:
             try:
                 await context.bot.send_message(
-                    chat_id=referrer_id,
-                    text=f"🎉 New Referral!\n\n{user.first_name} joined!\n💰 You earned ₹50\n\nBalance: ₹{get_user_stats(referrer_id)['balance']:.2f}"
+                    referrer_id, 
+                    f"🎉 NEW REFERRAL!\n\n{user.first_name} joined via your link!\n💰 +₹50 to your balance!"
                 )
             except:
                 pass
     
     stats = get_user_stats(user_id)
-    
-    welcome_message = f"""
-👋 Welcome {user.first_name}!
-
-🌟 Money Making Bot (Supabase v5)
-
-💰 Watch Ads: ₹3-5 each
-👥 Referrals: ₹50 + 5% commission  
-🎁 Daily Bonus: ₹5
-
-💵 Balance: ₹{stats['balance']:.2f}
-
-Start earning! 🚀
-    """
-    
-    await update.message.reply_text(welcome_message, reply_markup=create_main_keyboard())
+    await update.message.reply_text(
+        f"👋 Welcome {user.first_name}!\n\n"
+        f"💰 **Money Bot v6** (Supabase)\n\n"
+        f"💵 Balance: ₹{stats['balance']:.2f}\n"
+        f"👥 Referrals: {stats['referrals']}\n\n"
+        f"🚀 Start earning now!",
+        reply_markup=create_main_keyboard(),
+        parse_mode='Markdown'
+    )
 
 async def handle_watch_ads(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     stats = get_user_stats(user_id)
     
     if not stats:
-        await update.message.reply_text("Please /start first!")
+        await update.message.reply_text("Please /start first!", reply_markup=create_main_keyboard())
         return
     
     ad_reward = random.randint(3, 5)
     
-    # Update user
-    add_balance(user_id, ad_reward, 'balance')
-    add_balance(user_id, ad_reward, 'total_earnings')
+    # Update user earnings
+    increment_field(user_id, 'balance', ad_reward)
+    increment_field(user_id, 'total_earnings', ad_reward)
+    increment_field(user_id, 'ads_watched', 1)
     
-    # Increment ads watched
-    supabase.table('users').update({'ads_watched': supabase.rpc('increment_field', {'user_id': user_id, 'field': 'ads_watched'})}).eq('id', user_id).execute()
-    
-    # Referral commission
+    # Referral commission (5%)
     if stats['referrer_id']:
         commission = ad_reward * 0.05
-        add_balance(stats['referrer_id'], commission, 'balance')
-        add_balance(stats['referrer_id'], commission, 'commission_earned')
-        create_transaction(stats['referrer_id'], 'commission', commission, f"{update.effective_user.first_name} ad commission")
+        increment_field(stats['referrer_id'], 'balance', commission)
+        increment_field(stats['referrer_id'], 'commission_earned', commission)
+        create_transaction(stats['referrer_id'], 'commission', commission, f"{update.effective_user.first_name} watched ad")
     
-    # Log transaction
-    create_transaction(user_id, 'ad', ad_reward, f"Ad reward ₹{ad_reward}")
+    create_transaction(user_id, 'ad', ad_reward, f"Ad reward (₹{ad_reward})")
     
-    # Update stats
     stats = get_user_stats(user_id)
-    
     await update.message.reply_text(
-        f"🎉 Ad Watched!\n\n"
-        f"💰 Earned: ₹{ad_reward}\n"
-        f"💵 Balance: ₹{stats['balance']:.2f}\n"
-        f"📺 Total: {stats['ads_watched']}\n\n"
-        f"Keep watching! 🚀",
-        reply_markup=create_main_keyboard()
+        f"🎉 **Ad Watched Successfully!**\n\n"
+        f"💰 **Earned: ₹{ad_reward}**\n"
+        f"💵 **New Balance: ₹{stats['balance']:.2f}**\n"
+        f"📺 **Total Ads: {stats['ads_watched']}**\n\n"
+        f"Watch more ads! 🚀",
+        reply_markup=create_main_keyboard(),
+        parse_mode='Markdown'
     )
 
 async def handle_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     stats = get_user_stats(update.effective_user.id)
-    message = f"""
-💵 Your Stats
-
-💰 Balance: ₹{stats['balance']:.2f}
-📺 Ads: {stats['ads_watched']}
-💸 Earnings: ₹{stats['total_earnings']:.2f}
-👥 Referrals: {stats['referrals']}
-💎 Commission: ₹{stats['commission_earned']:.2f}
-    """
-    await update.message.reply_text(message, reply_markup=create_main_keyboard())
-
-async def handle_refer(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    bot_username = context.bot.username
-    referral_link = f"https://t.me/{bot_username}?start=ref_{update.effective_user.id}"
-    stats = get_user_stats(update.effective_user.id)
-    
-    message = f"""
-👥 Refer & Earn
-
-🔗 Your Link:
-`{referral_link}`
-
-💰 ₹50 per signup
-📈 5% commission EVERY ad
-
-📊 Stats:
-👥 Referrals: {stats['referrals']}
-💎 Commission: ₹{stats['commission_earned']:.2f}
-
-Share everywhere! 🚀
-    """
-    await update.message.reply_text(message, parse_mode='Markdown', reply_markup=create_main_keyboard())
+    await update.message.reply_text(
+        f"💵 **Your Stats**\n\n"
+        f"💰 Balance: `₹{stats['balance']:.2f}`\n"
+        f"📺 Ads Watched: `{stats['ads_watched']}`\n"
+        f"💸 Total Earnings: `₹{stats['total_earnings']:.2f}`\n"
+        f"👥 Referrals: `{stats['referrals']}`\n"
+        f"💎 Commission: `₹{stats['commission_earned']:.2f}`",
+        reply_markup=create_main_keyboard(),
+        parse_mode='Markdown'
+    )
 
 async def handle_bonus(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     
-    if not can_claim_bonus(user_id):
-        await update.message.reply_text("🎁 Bonus already claimed today!\nTomorrow ⏰", reply_markup=create_main_keyboard())
-        return
-    
-    bonus = 5.0
-    add_balance(user_id, bonus, 'balance')
-    supabase.table('users').update({'bonus_claimed': True}).eq('id', user_id).execute()
-    create_transaction(user_id, 'bonus', bonus, "Daily bonus")
-    
-    stats = get_user_stats(user_id)
-    await update.message.reply_text(
-        f"🎉 Bonus Claimed!\n\n"
-        f"💰 +₹5.00\n"
-        f"💵 Balance: ₹{stats['balance']:.2f}\n\n"
-        f"Tomorrow again! 🌟",
-        reply_markup=create_main_keyboard()
-    )
+    if can_claim_bonus(user_id):
+        bonus = 5.0
+        increment_field(user_id, 'balance', bonus)
+        update_user_field(user_id, 'bonus_claimed', True)
+        create_transaction(user_id, 'bonus', bonus, "Daily bonus ₹5")
+        
+        stats = get_user_stats(user_id)
+        await update.message.reply_text(
+            f"🎉 **Daily Bonus Claimed!**\n\n"
+            f"💰 **+₹5.00**\n"
+            f"💵 **New Balance: ₹{stats['balance']:.2f}**\n\n"
+            f"✅ Comes back tomorrow at midnight UTC!",
+            reply_markup=create_main_keyboard(),
+            parse_mode='Markdown'
+        )
+    else:
+        await update.message.reply_text(
+            "🎁 **Daily Bonus**\n\n"
+            "Already claimed today!\n⏰ Resets at midnight UTC\n\nKeep earning with ads & referrals! 🚀",
+            reply_markup=create_main_keyboard(),
+            parse_mode='Markdown'
+        )
 
-async def handle_extra(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Top 10 by balance
+    response = supabase.table('users').select('first_name, balance').order('balance', desc=True).limit(10).execute()
+    leaderboard = response.data
+    
+    msg = "🏆 **TOP 10 Richest Users**\n\n"
+    for i, user in enumerate(leaderboard, 1):
+        msg += f"{i}. {user['first_name']} - ₹{user['balance']:.2f}\n"
+    
+    await update.message.reply_text(msg + "\n👆 Be #1! 🚀", parse_mode='Markdown', reply_markup=create_main_keyboard())
+
+async def handle_refer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    bot_username = context.bot.username
+    user_id = update.effective_user.id
+    stats = get_user_stats(user_id)
+    
+    link = f"https://t.me/{bot_username}?start=ref_{user_id}"
     await update.message.reply_text(
-        "⭐ Extra Features\n\n"
-        "• Leaderboard\n"
-        "• Withdrawals (soon)\n"
-        "• Premium tasks\n\n"
-        "Coming soon! 🚀",
+        f"👥 **Refer & Earn**\n\n"
+        f"🔗 **Your Link:**\n`{link}`\n\n"
+        f"💰 **₹50 per signup**\n"
+        f"📈 **5% commission FOREVER** on their ads\n\n"
+        f"📊 **Your Stats:**\n"
+        f"👥 Referrals: `{stats['referrals']}`\n"
+        f"💎 Commission: `₹{stats['commission_earned']:.2f}`",
+        parse_mode='Markdown',
         reply_markup=create_main_keyboard()
     )
 
@@ -265,22 +258,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_refer(update, context)
     elif text == "🎁 Bonus":
         await handle_bonus(update, context)
-    elif text == "⭐ Extra":
-        await handle_extra(update, context)
+    elif text == "⭐ Leaderboard":
+        await handle_leaderboard(update, context)
+    elif text == "📊 Stats":
+        await handle_balance(update, context)
     else:
-        await update.message.reply_text("Use buttons below 👇", reply_markup=create_main_keyboard())
+        await update.message.reply_text("Use the buttons below 👇", reply_markup=create_main_keyboard())
 
 def main():
-    TOKEN = os.getenv('BOT_TOKEN')
-    if not TOKEN:
-        logger.error("BOT_TOKEN not set!")
+    if not all([os.getenv('BOT_TOKEN'), SUPABASE_URL, SUPABASE_ANON_KEY]):
+        logger.error("Missing env vars!")
         return
     
-    app = Application.builder().token(TOKEN).build()
+    app = Application.builder().token(os.getenv('BOT_TOKEN')).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    logger.info("🤖 Supabase Money Bot v5 Started!")
+    logger.info("🤖 Money Bot v6 Started - VPS-PROOF!")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
