@@ -1,5 +1,6 @@
 import logging
 import os
+import asyncio
 from dotenv import load_dotenv
 load_dotenv()
 import random
@@ -19,67 +20,7 @@ if not all([BOT_TOKEN, SUPABASE_URL, SUPABASE_ANON_KEY]):
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Add this GLOBAL variable at top (after imports)
-app = None
-
-def create_user(user_id: int, first_name: str, username: str = None, referrer_id: int = None):
-    user_data = {
-        'id': user_id, 'telegram_username': username, 'first_name': first_name,
-        'balance': 0.0, 'referrals': 0, 'ads_watched': 0,
-        'total_earnings': 0.0, 'commission_earned': 0.0,
-        'bonus_claimed': False, 'last_bonus_date': None, 'referrer_id': referrer_id,
-        'created_at': datetime.utcnow().isoformat()
-    }
-    supabase.table('users').insert(user_data).execute()
-    
-    if referrer_id and app:  # Check app exists
-        try:
-            referrer = get_user(referrer_id)
-            if referrer:
-                # UPDATE STATS
-                new_referrals = referrer['referrals'] + 1
-                supabase.table('users').update({
-                    'referrals': new_referrals,
-                    'balance': referrer['balance'] + 50.0
-                }).eq('id', referrer_id).execute()
-                
-                # TRANSACTION
-                supabase.table('transactions').insert({
-                    'user_id': referrer_id, 'type': 'referral_signup',
-                    'amount': 50.0, 'description': f"New referral: {first_name}",
-                    'created_at': datetime.utcnow().isoformat()
-                }).execute()
-                
-                # ✅ REFERRAL NOTIFICATION
-                try:
-                    await app.bot.send_message(
-                        chat_id=referrer_id,
-                        text=f"🎉 **NEW REFERRAL ALERT!** 🎉\n\n"
-                             f"👤 **{first_name}** just joined!\n"
-                             f"💰 **+₹50** INSTANT bonus\n"
-                             f"👥 **Referrals: {new_referrals}**\n\n"
-                             f"📈 **5% LIFETIME** commission on their ads!\n\n"
-                             f"🚀 Share more = Earn MORE! 💎",
-                        parse_mode='Markdown',
-                        reply_markup=create_main_keyboard()
-                    )
-                except Exception as notify_error:
-                    logger.error(f"Notification failed: {notify_error}")
-        except Exception as e:
-            logger.error(f"Referral processing failed: {e}")
-
-# UPDATE main() function
-def main():
-    global app  # Make app global for create_user()
-    logger.info("🤖 CashyAds v7.8 - REFERRAL NOTIFICATIONS")
-    
-    app = Application.builder().token(BOT_TOKEN).build()
-    
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(button_callback))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    
-    app.run_polling(drop_pending_updates=True)
+app = None  # Global app for notifications
 
 try:
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
@@ -105,20 +46,47 @@ def create_user(user_id: int, first_name: str, username: str = None, referrer_id
     }
     supabase.table('users').insert(user_data).execute()
     
-    if referrer_id:
+    # ✅ ASYNC REFERRAL NOTIFICATION (FIXED)
+    if referrer_id and app:
         try:
             referrer = get_user(referrer_id)
             if referrer:
+                # UPDATE STATS
+                new_referrals = referrer['referrals'] + 1
                 supabase.table('users').update({
-                    'referrals': referrer['referrals'] + 1,
+                    'referrals': new_referrals,
                     'balance': referrer['balance'] + 50.0
                 }).eq('id', referrer_id).execute()
+                
+                # TRANSACTION
                 supabase.table('transactions').insert({
                     'user_id': referrer_id, 'type': 'referral_signup',
                     'amount': 50.0, 'description': f"New referral: {first_name}",
                     'created_at': datetime.utcnow().isoformat()
                 }).execute()
-        except: pass
+                
+                # ✅ FIRE-AND-FORGET NOTIFICATION
+                asyncio.create_task(send_referral_notification(referrer_id, first_name, new_referrals))
+        except Exception as e:
+            logger.error(f"Referral processing failed: {e}")
+
+# ✅ NEW: ASYNC NOTIFICATION FUNCTION
+async def send_referral_notification(referrer_id: int, new_user_name: str, total_referrals: int):
+    try:
+        await app.bot.send_message(
+            chat_id=referrer_id,
+            text=f"🎉 **NEW REFERRAL ALERT!** 🎉\n\n"
+                 f"👤 **{new_user_name}** just joined via your link!\n\n"
+                 f"💰 **+₹50** INSTANT bonus added\n"
+                 f"👥 **Total Referrals: {total_referrals}**\n\n"
+                 f"📈 **5% LIFETIME commission** on their ads!\n\n"
+                 f"🚀 Share more = Earn MORE! 💎",
+            parse_mode='Markdown',
+            reply_markup=create_main_keyboard()
+        )
+        logger.info(f"✅ Referral notification sent to {referrer_id}")
+    except Exception as e:
+        logger.error(f"❌ Notification failed for {referrer_id}: {e}")
 
 def get_user_stats(user_id: int):
     user = get_user(user_id)
