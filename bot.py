@@ -8,6 +8,69 @@ from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboard
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 from supabase import create_client, Client
 
+# Add this GLOBAL variable at top (after imports)
+app = None
+
+def create_user(user_id: int, first_name: str, username: str = None, referrer_id: int = None):
+    user_data = {
+        'id': user_id, 'telegram_username': username, 'first_name': first_name,
+        'balance': 0.0, 'referrals': 0, 'ads_watched': 0,
+        'total_earnings': 0.0, 'commission_earned': 0.0,
+        'bonus_claimed': False, 'last_bonus_date': None, 'referrer_id': referrer_id,
+        'created_at': datetime.utcnow().isoformat()
+    }
+    supabase.table('users').insert(user_data).execute()
+    
+    if referrer_id and app:  # Check app exists
+        try:
+            referrer = get_user(referrer_id)
+            if referrer:
+                # UPDATE STATS
+                new_referrals = referrer['referrals'] + 1
+                supabase.table('users').update({
+                    'referrals': new_referrals,
+                    'balance': referrer['balance'] + 50.0
+                }).eq('id', referrer_id).execute()
+                
+                # TRANSACTION
+                supabase.table('transactions').insert({
+                    'user_id': referrer_id, 'type': 'referral_signup',
+                    'amount': 50.0, 'description': f"New referral: {first_name}",
+                    'created_at': datetime.utcnow().isoformat()
+                }).execute()
+                
+                # ✅ REFERRAL NOTIFICATION
+                try:
+                    await app.bot.send_message(
+                        chat_id=referrer_id,
+                        text=f"🎉 **NEW REFERRAL ALERT!** 🎉\n\n"
+                             f"👤 **{first_name}** just joined!\n"
+                             f"💰 **+₹50** INSTANT bonus\n"
+                             f"👥 **Referrals: {new_referrals}**\n\n"
+                             f"📈 **5% LIFETIME** commission on their ads!\n\n"
+                             f"🚀 Share more = Earn MORE! 💎",
+                        parse_mode='Markdown',
+                        reply_markup=create_main_keyboard()
+                    )
+                except Exception as notify_error:
+                    logger.error(f"Notification failed: {notify_error}")
+        except Exception as e:
+            logger.error(f"Referral processing failed: {e}")
+
+# UPDATE main() function
+def main():
+    global app  # Make app global for create_user()
+    logger.info("🤖 CashyAds v7.8 - REFERRAL NOTIFICATIONS")
+    
+    app = Application.builder().token(BOT_TOKEN).build()
+    
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(button_callback))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
+    app.run_polling(drop_pending_updates=True)
+
+
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 SUPABASE_URL = os.getenv('SUPABASE_URL')
 SUPABASE_ANON_KEY = os.getenv('SUPABASE_ANON_KEY')
