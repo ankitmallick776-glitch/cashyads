@@ -307,7 +307,8 @@ async def handle_extra(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode='Markdown'
     )
 
-# WITHDRAWAL CHECK (min ₹380 + 15 referrals)
+    # REPLACE the withdraw functions with these FIXED versions:
+
 async def handle_withdraw_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_id = query.from_user.id
@@ -318,17 +319,20 @@ async def handle_withdraw_check(update: Update, context: ContextTypes.DEFAULT_TY
     
     if not balance_ok:
         await query.answer(f"❌ Minimum ₹380 required!\nCurrent: ₹{stats['balance']:.2f}", show_alert=True)
+        await query.edit_message_text("💵 **Withdraw Requirements Not Met**", reply_markup=create_main_keyboard())
         return False
+    
     if not referrals_ok:
         remaining = 15 - stats['referrals']
         await query.answer(f"👥 {stats['referrals']}/15 referrals\nNeed {remaining} more!", show_alert=True)
+        await query.edit_message_text("💵 **Withdraw Requirements Not Met**", reply_markup=create_main_keyboard())
         return False
     
+    # ✅ FIXED: Show method selection
     withdraw_kb = create_withdraw_keyboard()
     await query.edit_message_text("💳 **Select Withdraw Method**", reply_markup=withdraw_kb, parse_mode='Markdown')
     return True
 
-# WITHDRAW METHOD SELECTED
 async def handle_withdraw_method(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     data = query.data
@@ -338,13 +342,14 @@ async def handle_withdraw_method(update: Update, context: ContextTypes.DEFAULT_T
         return
     
     if not data.startswith("withdraw_"):
+        await query.answer("Invalid selection")
         return
     
     method = data.split('_')[1].upper()
     user_id = query.from_user.id
     stats = get_user_stats(user_id)
     
-    # STORE withdraw intent - DEDUCT LATER after details
+    # Store withdraw intent
     context.user_data['awaiting_withdraw_details'] = True
     context.user_data['withdraw_method'] = method
     context.user_data['withdraw_amount'] = stats['balance']
@@ -353,13 +358,15 @@ async def handle_withdraw_method(update: Update, context: ContextTypes.DEFAULT_T
         f"✅ **Withdrawal Request Created!**\n\n"
         f"💰 Amount: `₹{stats['balance']:.2f}`\n"
         f"💳 Method: **{method}**\n\n"
-        f"📝 **Send your {method} details:**\n"
+        f"📝 **Send your {method} details right now:**\n"
         f"`yourupi@paytm` or `bank details` or `wallet address`\n\n"
-        f"⏰ **Processing: 6-7 working days**",
+        f"⏰ Processing: 6-7 working days",
         parse_mode='Markdown',
         reply_markup=None
     )
+    await query.answer(f"{method} selected! Send details now.")
 
+# FIXED button_callback - handle ALL withdraw cases
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -368,32 +375,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_withdraw_check(update, context)
     elif query.data.startswith("withdraw_") or query.data in ["withdraw_cancel", "back_main"]:
         await handle_withdraw_method(update, context)
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    text = update.message.text
-    
-    # ✅ WITHDRAW DETAILS RECEIVED - NOW DEDUCT
-    if context.user_data.get('awaiting_withdraw_details'):
-        method = context.user_data.get('withdraw_method', 'UPI')
-        amount = context.user_data.get('withdraw_amount', 0)
-        
-        # DEDUCT NOW - safe after details
-        increment_field(user_id, 'balance', -amount)
-        create_transaction(user_id, 'withdraw', -amount, f"{method}: {text}")
-        
-        context.user_data.clear()
-        
-        await update.message.reply_text(
-            f"📝 **{method} details received!**\n\n"
-            f"✅ Withdrawal **successful**!\n"
-            f"💰 Amount: `₹{amount:.2f}`\n"
-            f"⏰ Processing within **6-7 working days**.\n\n"
-            f"🚀 Keep earning more!",
-            reply_markup=create_main_keyboard(),
-            parse_mode='Markdown'
-        )
-        return
+    else:
+        await query.answer("Use main menu buttons!")
     
     # BUTTON HANDLERS
     if text == "💰 Watch Ads":
