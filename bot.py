@@ -34,7 +34,7 @@ def create_user(user_id: int, first_name: str, username: str = None, referrer_id
         'bonus_claimed': False,
         'last_bonus_date': None,
         'referrer_id': referrer_id,
-        'created_at': datetime.utcnow()
+        'created_at': datetime.utcnow().isoformat()
     }
     supabase.table('users').insert(user_data).execute()
     
@@ -102,7 +102,7 @@ def create_transaction(user_id: int, trans_type: str, amount: float, description
         'type': trans_type,
         'amount': amount,
         'description': description,
-        'created_at': datetime.utcnow()
+        'created_at': datetime.utcnow().isoformat()
     }).execute()
 
 def create_main_keyboard():
