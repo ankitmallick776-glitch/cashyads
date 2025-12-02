@@ -271,7 +271,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             referrer_id = int(context.args[0][4:])
         except: pass
     
-        if not get_user(user_id):
+    if not get_user(user_id):
         create_user(user_id, user.first_name, user.username, referrer_id)
 
     stats = get_user_stats(user_id)
