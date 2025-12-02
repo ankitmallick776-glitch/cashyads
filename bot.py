@@ -250,6 +250,10 @@ async def ad_completed(request: Request):
 
 # ✅ NEW: WEB APP DATA HANDLER (PRIMARY FOR REWARDS)
 async def handle_web_app_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # **NEW: Guard to only process actual web_app_data messages**
+    if not update.message or not update.message.web_app_data:
+        return  # Ignore if not a web app callback
+    
     user_id = update.effective_user.id
     try:
         data = json.loads(update.message.web_app_data)
@@ -266,7 +270,7 @@ async def handle_web_app_data(update: Update, context: ContextTypes.DEFAULT_TYPE
             await update.message.reply_text("⏰ Wait 5 mins between ads!")
             return
         
-        # Credit reward
+        # Credit reward (rest unchanged)
         ad_reward = random.randint(3, 5)
         increment_field(user_id, 'balance', ad_reward)
         increment_field(user_id, 'total_earnings', ad_reward)
