@@ -286,7 +286,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def handle_watch_ads(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    mini_app_url = "https://teleadviewer.pages.dev/"  # YOUR CLOUDFLARE
+    user_id = update.effective_user.id
+api_url = f"http://{VPS_IP}:{API_PORT}/cashyads/ad-completed"
+mini_app_url = f"https://teleadviewer.pages.dev/?api={api_url}&user_id={user_id}"  # NEW  # YOUR CLOUDFLARE
     
     await update.message.reply_text(
         f"📱 **Premium Video Ads** (Fixed v8.1)\n\n"
