@@ -29,6 +29,25 @@ except Exception as e:
     logger.error(f"❌ Supabase failed: {e}")
     exit(1)
 
+# ✅ ASYNC NOTIFICATION FUNCTION
+async def send_referral_notification(referrer_id: int, first_name: str, new_referrals: int):
+    global app
+    if app:
+        try:
+            await app.bot.send_message(
+                chat_id=referrer_id,
+                text=f"🎉 **NEW REFERRAL ALERT!** 🎉\n\n"
+                     f"👤 **{first_name}** just joined via your link!\n"
+                     f"💰 **+₹50** INSTANT bonus added!\n"
+                     f"👥 **Total Referrals: {new_referrals}**\n\n"
+                     f"📈 **5% LIFETIME commission** on their ads!\n\n"
+                     f"🚀 Share more = Earn MORE! 💎",
+                parse_mode='Markdown',
+                reply_markup=create_main_keyboard()
+            )
+        except Exception as e:
+            logger.error(f"Notification failed: {e}")
+
 def get_user(user_id: int):
     try:
         response = supabase.table('users').select('*').eq('id', user_id).execute()
@@ -46,47 +65,29 @@ def create_user(user_id: int, first_name: str, username: str = None, referrer_id
     }
     supabase.table('users').insert(user_data).execute()
     
-    # ✅ ASYNC REFERRAL NOTIFICATION (FIXED)
-    if referrer_id and app:
+    # ✅ REFERRAL PROCESSING (NON-BLOCKING)
+    if referrer_id:
         try:
             referrer = get_user(referrer_id)
             if referrer:
-                # UPDATE STATS
                 new_referrals = referrer['referrals'] + 1
                 supabase.table('users').update({
                     'referrals': new_referrals,
                     'balance': referrer['balance'] + 50.0
                 }).eq('id', referrer_id).execute()
                 
-                # TRANSACTION
                 supabase.table('transactions').insert({
                     'user_id': referrer_id, 'type': 'referral_signup',
                     'amount': 50.0, 'description': f"New referral: {first_name}",
                     'created_at': datetime.utcnow().isoformat()
                 }).execute()
                 
-                # ✅ FIRE-AND-FORGET NOTIFICATION
+                # ✅ NON-BLOCKING NOTIFICATION
                 asyncio.create_task(send_referral_notification(referrer_id, first_name, new_referrals))
         except Exception as e:
             logger.error(f"Referral processing failed: {e}")
 
-# ✅ NEW: ASYNC NOTIFICATION FUNCTION
-async def send_referral_notification(referrer_id: int, new_user_name: str, total_referrals: int):
-    try:
-        await app.bot.send_message(
-            chat_id=referrer_id,
-            text=f"🎉 **NEW REFERRAL ALERT!** 🎉\n\n"
-                 f"👤 **{new_user_name}** just joined via your link!\n\n"
-                 f"💰 **+₹50** INSTANT bonus added\n"
-                 f"👥 **Total Referrals: {total_referrals}**\n\n"
-                 f"📈 **5% LIFETIME commission** on their ads!\n\n"
-                 f"🚀 Share more = Earn MORE! 💎",
-            parse_mode='Markdown',
-            reply_markup=create_main_keyboard()
-        )
-        logger.info(f"✅ Referral notification sent to {referrer_id}")
-    except Exception as e:
-        logger.error(f"❌ Notification failed for {referrer_id}: {e}")
+# ... ALL OTHER FUNCTIONS SAME AS v7.7 (get_user_stats, keyboards, handlers) ...
 
 def get_user_stats(user_id: int):
     user = get_user(user_id)
@@ -166,7 +167,9 @@ def create_extra_keyboard():
         [InlineKeyboardButton("🔙 Main Menu", callback_data="back_main")]
     ])
 
+# ALL HANDLERS (same as v7.7 - start, watch_ads, balance, etc.)
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global app
     user = update.effective_user
     user_id = user.id
     
@@ -182,7 +185,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     stats = get_user_stats(user_id)
     await update.message.reply_text(
         f"👋 Welcome {user.first_name}!\n\n"
-        f"💰 **CashyAds v7.7** (Production)\n\n"
+        f"💰 **CashyAds v7.8** (Production)\n\n"
         f"💵 Balance: ₹{stats['balance']:.2f}\n"
         f"👥 Referrals: {stats['referrals']}\n\n"
         f"🚀 Start earning now!",
@@ -190,12 +193,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode='Markdown'
     )
 
+# Include ALL other handlers from v7.7 (handle_watch_ads, handle_balance, handle_refer, etc.)
+# ... (copy from previous v7.7 code - all handlers are identical)
+
 async def handle_watch_ads(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # SAME AS v7.7
     user_id = update.effective_user.id
     stats = get_user_stats(user_id)
     
     ad_reward = random.randint(3, 5)
-    
     increment_field(user_id, 'balance', ad_reward)
     increment_field(user_id, 'total_earnings', ad_reward)
     increment_field(user_id, 'ads_watched', 1)
@@ -208,8 +214,8 @@ async def handle_watch_ads(update: Update, context: ContextTypes.DEFAULT_TYPE):
                           f"{update.effective_user.first_name} watched ad")
     
     create_transaction(user_id, 'ad', ad_reward, f"Ad reward (₹{ad_reward})")
-    
     stats = get_user_stats(user_id)
+    
     await update.message.reply_text(
         f"🎉 **Ad Watched Successfully!**\n\n"
         f"💰 **Earned: ₹{ad_reward}**\n"
@@ -426,13 +432,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("👇 Use the buttons below!", reply_markup=create_main_keyboard())
 
 def main():
-    logger.info("🤖 CashyAds v7.7 - ORIGINAL STYLE RESTORED")
+    global app
+    logger.info("🤖 CashyAds v7.8 - REFERRAL NOTIFICATIONS ✅")
+    
     app = Application.builder().token(BOT_TOKEN).build()
     
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
+    logger.info("✅ Bot starting...")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == '__main__':
