@@ -29,10 +29,36 @@ except Exception as e:
     logger.error(f"❌ Supabase failed: {e}")
     exit(1)
 
-# ✅ ASYNC NOTIFICATION FUNCTION
+# ✅ KEYBOARDS
+def create_main_keyboard():
+    return ReplyKeyboardMarkup([
+        [KeyboardButton("💰 Watch Ads")],
+        [KeyboardButton("💵 Balance"), KeyboardButton("👥 Refer & Earn")],
+        [KeyboardButton("🎁 Bonus"), KeyboardButton("⭐ Leaderboard")],
+        [KeyboardButton("⭐ Extra")]
+    ], resize_keyboard=True)
+
+def create_withdraw_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("1️⃣ UPI", callback_data="withdraw_upi")],
+        [InlineKeyboardButton("2️⃣ Paytm", callback_data="withdraw_paytm")],
+        [InlineKeyboardButton("3️⃣ Bank Transfer", callback_data="withdraw_bank")],
+        [InlineKeyboardButton("4️⃣ Paypal", callback_data="withdraw_paypal")],
+        [InlineKeyboardButton("5️⃣ USDT TRC20", callback_data="withdraw_usdt")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="withdraw_cancel")]
+    ])
+
+def create_extra_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📢 Main Channel", url="https://t.me/cashyads")],
+        [InlineKeyboardButton("💬 Support", url="https://t.me/cashyads_support")],
+        [InlineKeyboardButton("🔙 Main Menu", callback_data="back_main")]
+    ])
+
+# ✅ REFERRAL NOTIFICATION
 async def send_referral_notification(referrer_id: int, first_name: str, new_referrals: int):
     global app
-    if app:
+    if app and app.bot:
         try:
             await app.bot.send_message(
                 chat_id=referrer_id,
@@ -45,8 +71,9 @@ async def send_referral_notification(referrer_id: int, first_name: str, new_refe
                 parse_mode='Markdown',
                 reply_markup=create_main_keyboard()
             )
+            logger.info(f"✅ Referral notification sent to {referrer_id}")
         except Exception as e:
-            logger.error(f"Notification failed: {e}")
+            logger.error(f"❌ Notification failed for {referrer_id}: {e}")
 
 def get_user(user_id: int):
     try:
@@ -54,40 +81,6 @@ def get_user(user_id: int):
         return response.data[0] if response.data else None
     except:
         return None
-
-def create_user(user_id: int, first_name: str, username: str = None, referrer_id: int = None):
-    user_data = {
-        'id': user_id, 'telegram_username': username, 'first_name': first_name,
-        'balance': 0.0, 'referrals': 0, 'ads_watched': 0,
-        'total_earnings': 0.0, 'commission_earned': 0.0,
-        'bonus_claimed': False, 'last_bonus_date': None, 'referrer_id': referrer_id,
-        'created_at': datetime.utcnow().isoformat()
-    }
-    supabase.table('users').insert(user_data).execute()
-    
-    # ✅ REFERRAL PROCESSING (NON-BLOCKING)
-    if referrer_id:
-        try:
-            referrer = get_user(referrer_id)
-            if referrer:
-                new_referrals = referrer['referrals'] + 1
-                supabase.table('users').update({
-                    'referrals': new_referrals,
-                    'balance': referrer['balance'] + 50.0
-                }).eq('id', referrer_id).execute()
-                
-                supabase.table('transactions').insert({
-                    'user_id': referrer_id, 'type': 'referral_signup',
-                    'amount': 50.0, 'description': f"New referral: {first_name}",
-                    'created_at': datetime.utcnow().isoformat()
-                }).execute()
-                
-                # ✅ NON-BLOCKING NOTIFICATION
-                asyncio.create_task(send_referral_notification(referrer_id, first_name, new_referrals))
-        except Exception as e:
-            logger.error(f"Referral processing failed: {e}")
-
-# ... ALL OTHER FUNCTIONS SAME AS v7.7 (get_user_stats, keyboards, handlers) ...
 
 def get_user_stats(user_id: int):
     user = get_user(user_id)
@@ -142,32 +135,37 @@ def create_transaction(user_id: int, trans_type: str, amount: float, description
         }).execute()
     except: pass
 
-def create_main_keyboard():
-    return ReplyKeyboardMarkup([
-        [KeyboardButton("💰 Watch Ads")],
-        [KeyboardButton("💵 Balance"), KeyboardButton("👥 Refer & Earn")],
-        [KeyboardButton("🎁 Bonus"), KeyboardButton("⭐ Leaderboard")],
-        [KeyboardButton("⭐ Extra")]
-    ], resize_keyboard=True)
-
-def create_withdraw_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("1️⃣ UPI", callback_data="withdraw_upi")],
-        [InlineKeyboardButton("2️⃣ Paytm", callback_data="withdraw_paytm")],
-        [InlineKeyboardButton("3️⃣ Bank Transfer", callback_data="withdraw_bank")],
-        [InlineKeyboardButton("4️⃣ Paypal", callback_data="withdraw_paypal")],
-        [InlineKeyboardButton("5️⃣ USDT TRC20", callback_data="withdraw_usdt")],
-        [InlineKeyboardButton("❌ Cancel", callback_data="withdraw_cancel")]
-    ])
-
-def create_extra_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📢 Main Channel", url="https://t.me/cashyads")],
-        [InlineKeyboardButton("💬 Support", url="https://t.me/cashyads_support")],
-        [InlineKeyboardButton("🔙 Main Menu", callback_data="back_main")]
-    ])
-
-# ALL HANDLERS (same as v7.7 - start, watch_ads, balance, etc.)
+def create_user(user_id: int, first_name: str, username: str = None, referrer_id: int = None):
+    user_data = {
+        'id': user_id, 'telegram_username': username, 'first_name': first_name,
+        'balance': 0.0, 'referrals': 0, 'ads_watched': 0,
+        'total_earnings': 0.0, 'commission_earned': 0.0,
+        'bonus_claimed': False, 'last_bonus_date': None, 'referrer_id': referrer_id,
+        'created_at': datetime.utcnow().isoformat()
+    }
+    supabase.table('users').insert(user_data).execute()
+    
+    if referrer_id:
+        try:
+            referrer = get_user(referrer_id)
+            if referrer:
+                new_referrals = referrer['referrals'] + 1
+                supabase.table('users').update({
+                    'referrals': new_referrals,
+                    'balance': referrer['balance'] + 50.0
+                }).eq('id', referrer_id).execute()
+                
+                supabase.table('transactions').insert({
+                    'user_id': referrer_id, 'type': 'referral_signup',
+                    'amount': 50.0, 'description': f"New referral: {first_name}",
+                    'created_at': datetime.utcnow().isoformat()
+                }).execute()
+                
+                asyncio.create_task(send_referral_notification(referrer_id, first_name, new_referrals))
+                logger.info(f"✅ Referral processed: {first_name} -> {referrer_id}")
+        except Exception as e:
+            logger.error(f"❌ Referral failed: {e}")
+            
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global app
     user = update.effective_user
@@ -193,11 +191,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode='Markdown'
     )
 
-# Include ALL other handlers from v7.7 (handle_watch_ads, handle_balance, handle_refer, etc.)
-# ... (copy from previous v7.7 code - all handlers are identical)
-
 async def handle_watch_ads(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # SAME AS v7.7
     user_id = update.effective_user.id
     stats = get_user_stats(user_id)
     
@@ -310,7 +304,6 @@ async def handle_extra(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode='Markdown'
     )
 
-# ✅ ORIGINAL WITHDRAW FLOW - BULLETPROOF
 async def handle_withdraw_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
