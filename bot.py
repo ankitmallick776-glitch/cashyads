@@ -3,13 +3,14 @@ import os
 import asyncio
 import random
 import threading
+import json
 from dotenv import load_dotenv
 load_dotenv()
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
 import uvicorn
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 from supabase import create_client, Client
 
@@ -17,6 +18,7 @@ BOT_TOKEN = os.getenv('BOT_TOKEN')
 SUPABASE_URL = os.getenv('SUPABASE_URL')
 SUPABASE_ANON_KEY = os.getenv('SUPABASE_ANON_KEY')
 VPS_IP = os.getenv('VPS_IP', 'localhost')
+MINI_APP_URL = os.getenv('MINI_APP_URL', 'https://teleadviewer.pages.dev/')  # Configurable
 
 if not all([BOT_TOKEN, SUPABASE_URL, SUPABASE_ANON_KEY]):
     print("❌ ERROR: Missing .env variables (BOT_TOKEN, SUPABASE_URL, SUPABASE_ANON_KEY)")
@@ -86,7 +88,8 @@ def get_user(user_id: int):
     try:
         response = supabase.table('users').select('*').eq('id', user_id).execute()
         return response.data[0] if response.data else None
-    except:
+    except Exception as e:
+        logger.error(f"❌ Get user failed for {user_id}: {e}")
         return None
 
 def get_user_stats(user_id: int):
@@ -100,16 +103,18 @@ def get_user_stats(user_id: int):
             'commission_earned': float(user.get('commission_earned', 0)),
             'bonus_claimed': user.get('bonus_claimed', False),
             'last_bonus_date': user.get('last_bonus_date'),
-            'referrer_id': user.get('referrer_id')
+            'referrer_id': user.get('referrer_id'),
+            'last_ad_time': user.get('last_ad_time')
         }
     return {'balance': 0.0, 'referrals': 0, 'ads_watched': 0, 'total_earnings': 0.0, 
-            'commission_earned': 0.0, 'bonus_claimed': False, 'last_bonus_date': None, 'referrer_id': None}
+            'commission_earned': 0.0, 'bonus_claimed': False, 'last_bonus_date': None, 
+            'referrer_id': None, 'last_ad_time': None}
 
 def update_user_field(user_id: int, field: str, value): 
     try:
         supabase.table('users').update({field: value}).eq('id', user_id).execute()
-    except: 
-        logger.error(f"Update field failed: {field}={value} for user {user_id}")
+    except Exception as e:
+        logger.error(f"❌ Update field failed: {field}={value} for user {user_id}: {e}")
 
 def increment_field(user_id: int, field: str, amount: float = 1):
     try:
@@ -121,7 +126,7 @@ def increment_field(user_id: int, field: str, amount: float = 1):
             logger.info(f"Updated {field}: {current} → {new_value} for user {user_id}")
             return new_value
     except Exception as e:
-        logger.error(f"Increment failed {field}: {e}")
+        logger.error(f"❌ Increment failed {field}: {e}")
     return 0
 
 def can_claim_bonus(user_id: int) -> bool:
@@ -135,7 +140,9 @@ def can_claim_bonus(user_id: int) -> bool:
             update_user_field(user_id, 'last_bonus_date', today)
             return True
         return not user.get('bonus_claimed', False)
-    except: return False
+    except Exception as e:
+        logger.error(f"❌ Bonus check failed: {e}")
+        return False
 
 def create_transaction(user_id: int, trans_type: str, amount: float, description: str):
     try:
@@ -145,7 +152,7 @@ def create_transaction(user_id: int, trans_type: str, amount: float, description
         }).execute()
         logger.info(f"Transaction created: user={user_id}, type={trans_type}, amount={amount}")
     except Exception as e:
-        logger.error(f"Transaction failed: {e}")
+        logger.error(f"❌ Transaction failed: {e}")
 
 def create_user(user_id: int, first_name: str, username: str = None, referrer_id: int = None):
     user_data = {
@@ -153,6 +160,7 @@ def create_user(user_id: int, first_name: str, username: str = None, referrer_id
         'balance': 0.0, 'referrals': 0, 'ads_watched': 0,
         'total_earnings': 0.0, 'commission_earned': 0.0,
         'bonus_claimed': False, 'last_bonus_date': None, 'referrer_id': referrer_id,
+        'last_ad_time': None,  # New field
         'created_at': datetime.utcnow().isoformat()
     }
     supabase.table('users').insert(user_data).execute()
@@ -173,12 +181,14 @@ def create_user(user_id: int, first_name: str, username: str = None, referrer_id
                     'created_at': datetime.utcnow().isoformat()
                 }).execute()
                 
-                asyncio.create_task(send_referral_notification(referrer_id, first_name, new_referrals))
+                # Fixed: Run async task properly
+                loop = asyncio.get_event_loop()
+                loop.create_task(send_referral_notification(referrer_id, first_name, new_referrals))
                 logger.info(f"✅ Referral processed: {first_name} -> {referrer_id}")
         except Exception as e:
             logger.error(f"❌ Referral failed: {e}")
 
-# ✅ FIXED FASTAPI ENDPOINT - ACCEPTS ALL RESULTS
+# ✅ SECURE FASTAPI ENDPOINT - FALLBACK WITH BASIC CHECK
 @app_fastapi.post("/cashyads/ad-completed")
 async def ad_completed(request: Request):
     try:
@@ -188,19 +198,26 @@ async def ad_completed(request: Request):
 
         logger.info(f"🎬 Ad webhook: user={user_id}, result={result}, data={data}")
 
-        # ✅ FIXED: Accept ALL success results from Mini App
+        # ✅ Accept ALL success results from Mini App
         success_results = {
             'completed', 'success', 'video_completed', 'full_video_complete', 
             'video_viewed', 'full_video', 'viewed', 'test', 'debug'
         }
 
         if result in success_results:
+            # Basic rate limit check (add full verification later)
+            user = get_user(user_id)
+            if user and user.get('last_ad_time') and (datetime.utcnow() - datetime.fromisoformat(user['last_ad_time'])).total_seconds() < 300:
+                logger.warning(f"⚠️ Rate limit hit for {user_id}")
+                return JSONResponse({"success": False, "message": "Too soon! Wait 5 mins."})
+
             ad_reward = random.randint(3, 5)
 
             # UPDATE BALANCE
             increment_field(user_id, 'balance', ad_reward)
             increment_field(user_id, 'total_earnings', ad_reward)
             increment_field(user_id, 'ads_watched', 1)
+            update_user_field(user_id, 'last_ad_time', datetime.utcnow().isoformat())
 
             # REFERRAL COMMISSION
             stats = get_user_stats(user_id)
@@ -209,7 +226,7 @@ async def ad_completed(request: Request):
                 increment_field(stats['referrer_id'], 'balance', commission)
                 increment_field(stats['referrer_id'], 'commission_earned', commission)
                 create_transaction(stats['referrer_id'], 'commission', commission, 
-                                 f"Mini App ad commission from {user_id}")
+                                   f"Mini App ad commission from {user_id}")
 
             # TRANSACTION LOG
             create_transaction(user_id, 'mini_app_ad', ad_reward, f"Video ad reward ({result})")
@@ -231,10 +248,61 @@ async def ad_completed(request: Request):
         logger.error(f"❌ Ad endpoint ERROR: {e}, data={await request.json()}")
         raise HTTPException(status_code=500, detail="Server error")
 
+# ✅ NEW: WEB APP DATA HANDLER (PRIMARY FOR REWARDS)
+async def handle_web_app_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    try:
+        data = json.loads(update.message.web_app_data)
+        result = data.get('result', '').lower()
+        
+        # Verify result
+        if result not in {'completed', 'success', 'video_completed', 'full_video_complete', 'video_viewed', 'full_video', 'viewed'}:
+            await update.message.reply_text("❌ Invalid ad completion. Try again.")
+            return
+        
+        # Rate limit
+        stats = get_user_stats(user_id)
+        if stats['last_ad_time'] and (datetime.utcnow() - datetime.fromisoformat(stats['last_ad_time'])).total_seconds() < 300:
+            await update.message.reply_text("⏰ Wait 5 mins between ads!")
+            return
+        
+        # Credit reward
+        ad_reward = random.randint(3, 5)
+        increment_field(user_id, 'balance', ad_reward)
+        increment_field(user_id, 'total_earnings', ad_reward)
+        increment_field(user_id, 'ads_watched', 1)
+        update_user_field(user_id, 'last_ad_time', datetime.utcnow().isoformat())
+        
+        # Referral commission
+        if stats.get('referrer_id'):
+            commission = ad_reward * 0.05
+            increment_field(stats['referrer_id'], 'balance', commission)
+            increment_field(stats['referrer_id'], 'commission_earned', commission)
+            create_transaction(stats['referrer_id'], 'commission', commission, f"Ad commission from {user_id}")
+        
+        create_transaction(user_id, 'mini_app_ad', ad_reward, f"Video ad reward ({result})")
+        
+        new_balance = get_user_stats(user_id)['balance']
+        await update.message.reply_text(
+            f"🎬 **Ad Watched Successfully!**\n\n"
+            f"💰 **+₹{ad_reward}** credited!\n"
+            f"💵 **New Balance: ₹{new_balance:.2f}**\n\n"
+            f"👏 Great job! Watch more to earn.",
+            reply_markup=create_main_keyboard(),
+            parse_mode='Markdown'
+        )
+        logger.info(f"✅ Web App Reward: user={user_id}, ₹{ad_reward}, balance=₹{new_balance:.2f}")
+        
+    except json.JSONDecodeError:
+        await update.message.reply_text("❌ Invalid data from ad viewer.")
+    except Exception as e:
+        logger.error(f"❌ Web App Data Error: {e}")
+        await update.message.reply_text("❌ Error processing reward. Contact support.")
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global app
     user = update.effective_user
-    user_id = user.id
+    user_id = user.id 
     
     referrer_id = None
     if context.args and context.args[0].startswith('ref_'):
@@ -248,7 +316,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     stats = get_user_stats(user_id)
     await update.message.reply_text(
         f"👋 Welcome {user.first_name}!\n\n"
-        f"💰 **CashyAds v8.0** (Video Ads + API Fixed)\n\n"
+        f"💰 **CashyAds v8.1** (Secure Web App Rewards)\n\n"
         f"💵 Balance: ₹{stats['balance']:.2f}\n"
         f"👥 Referrals: {stats['referrals']}\n\n"
         f"🚀 Start earning now!",
@@ -257,16 +325,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def handle_watch_ads(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    mini_app_url = "https://teleadviewer.pages.dev/"  # YOUR CLOUDFLARE
-    
     await update.message.reply_text(
-        f"📱 **Premium Video Ads** (Fixed v8.0)\n\n"
+        f"📱 **Premium Video Ads** (v8.1 Secure)\n\n"
         f"🎥 Watch **ONE** video ad (25s)\n"
         f"💰 **Earn ₹3-5 GUARANTEED**\n"
         f"👥 **5% commission** to referrer\n\n"
         f"🔥 **OPEN VIDEO ADS** 👇",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🎬 WATCH VIDEO AD", web_app={"url": mini_app_url})]
+            [InlineKeyboardButton("🎬 WATCH VIDEO AD", web_app=WebAppInfo(url=MINI_APP_URL))]
         ]),
         parse_mode='Markdown'
     )
@@ -338,7 +404,8 @@ async def handle_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE)
             msg += f"{i}. {user['first_name']} - ₹{float(user['balance']):.2f}\n"
         
         await update.message.reply_text(msg + "\n👆 Be #1! 🚀", parse_mode='Markdown', reply_markup=create_main_keyboard())
-    except:
+    except Exception as e:
+        logger.error(f"❌ Leaderboard error: {e}")
         await update.message.reply_text("Leaderboard temporarily unavailable!", reply_markup=create_main_keyboard())
 
 async def handle_extra(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -415,9 +482,17 @@ async def handle_withdraw_method(update: Update, context: ContextTypes.DEFAULT_T
     method = data.split('_')[1].upper()
     stats = get_user_stats(user_id)
     
+    # Simple timeout: Check if pending >5 mins (store timestamp in user_data)
+    pending_time = context.user_data.get('withdraw_pending_time')
+    if pending_time and (datetime.utcnow() - datetime.fromisoformat(pending_time)).total_seconds() > 300:
+        context.user_data.clear()
+        await query.message.reply_text("⏰ Withdraw session expired. Start over.", reply_markup=create_main_keyboard())
+        return
+    
     context.user_data['awaiting_withdraw_details'] = True
     context.user_data['withdraw_method'] = method
     context.user_data['withdraw_amount'] = stats['balance']
+    context.user_data['withdraw_pending_time'] = datetime.utcnow().isoformat()
     
     await query.message.reply_text(
         f"✅ **Withdrawal Initiated!**\n\n"
@@ -425,7 +500,7 @@ async def handle_withdraw_method(update: Update, context: ContextTypes.DEFAULT_T
         f"💳 Method: **{method}**\n\n"
         f"📝 **Send your {method} details:**\n"
         f"`yourupi@paytm` or `bank details` or `wallet address`\n\n"
-        f"⏰ **Processing: 6-7 working days**",
+        f"⏰ **Processing: 6-7 working days** (Reply within 5 mins)",
         parse_mode='Markdown',
         reply_markup=None
     )
@@ -445,6 +520,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get('awaiting_withdraw_details'):
         method = context.user_data.get('withdraw_method', 'UPI')
         amount = context.user_data.get('withdraw_amount', 0)
+        pending_time = context.user_data.get('withdraw_pending_time')
+        
+        # Timeout check
+        if pending_time and (datetime.utcnow() - datetime.fromisoformat(pending_time)).total_seconds() > 300:
+            context.user_data.clear()
+            await update.message.reply_text("⏰ Session expired. Use /start to retry.", reply_markup=create_main_keyboard())
+            return
         
         increment_field(user_id, 'balance', -amount)
         create_transaction(user_id, 'withdraw', -amount, f"{method}: {text}")
@@ -482,7 +564,7 @@ def run_api_server():
 
 def main():
     global app
-    logger.info("🤖 CashyAds v8.0 - FIXED API + Video Ads")
+    logger.info("🤖 CashyAds v8.1 - Secure Web App + Rate Limits")
     
     # Telegram Bot
     app = Application.builder().token(BOT_TOKEN).build()
@@ -491,11 +573,12 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(MessageHandler(filters.UpdateType.WEB_APP_DATA, handle_web_app_data))  # New
     
     # API Server
     api_thread = threading.Thread(target=run_api_server, daemon=True)
     api_thread.start()
-    logger.info(f"🌐 API: http://{VPS_IP}:8000/cashyads/ad-completed")
+    logger.info(f"🌐 API: http://{VPS_IP}:8001/cashyads/ad-completed")  # Fixed port
     
     logger.info("✅ Bot + API Running...")
     app.run_polling(drop_pending_updates=True)
