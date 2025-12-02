@@ -8,7 +8,6 @@ load_dotenv()
 from datetime import datetime, date
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
-from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
@@ -18,7 +17,6 @@ BOT_TOKEN = os.getenv('BOT_TOKEN')
 SUPABASE_URL = os.getenv('SUPABASE_URL')
 SUPABASE_ANON_KEY = os.getenv('SUPABASE_ANON_KEY')
 VPS_IP = os.getenv('VPS_IP', 'localhost')
-API_PORT = int(os.getenv('API_PORT', 8001))
 
 if not all([BOT_TOKEN, SUPABASE_URL, SUPABASE_ANON_KEY]):
     print("❌ ERROR: Missing .env variables (BOT_TOKEN, SUPABASE_URL, SUPABASE_ANON_KEY)")
@@ -29,15 +27,6 @@ logger = logging.getLogger(__name__)
 
 app = None  # Global Telegram app
 app_fastapi = FastAPI(title="CashyAds API", version="1.0")
-
-# ✅ ADD CORS MIDDLEWARE (FIX #1)
-app_fastapi.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # Allow CloudFlare mini-app
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 try:
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
@@ -122,22 +111,18 @@ def update_user_field(user_id: int, field: str, value):
     except: 
         logger.error(f"Update field failed: {field}={value} for user {user_id}")
 
-# ✅ FIX #2: BETTER ERROR HANDLING IN INCREMENT
 def increment_field(user_id: int, field: str, amount: float = 1):
     try:
         user = get_user(user_id)
-        if not user:
-            logger.error(f"❌ User {user_id} NOT FOUND - Cannot increment {field}")
-            return None  # Return None to indicate failure
-        
-        current = float(user.get(field, 0))
-        new_value = current + amount
-        supabase.table('users').update({field: new_value}).eq('id', user_id).execute()
-        logger.info(f"✅ Updated {field}: {current} → {new_value} for user {user_id}")
-        return new_value
+        if user:
+            current = float(user.get(field, 0))
+            new_value = current + amount
+            supabase.table('users').update({field: new_value}).eq('id', user_id).execute()
+            logger.info(f"Updated {field}: {current} → {new_value} for user {user_id}")
+            return new_value
     except Exception as e:
-        logger.error(f"❌ Increment failed {field}={amount} for user {user_id}: {e}")
-        return None
+        logger.error(f"Increment failed {field}: {e}")
+    return 0
 
 def can_claim_bonus(user_id: int) -> bool:
     try:
@@ -158,9 +143,9 @@ def create_transaction(user_id: int, trans_type: str, amount: float, description
             'user_id': user_id, 'type': trans_type, 'amount': amount,
             'description': description, 'created_at': datetime.utcnow().isoformat()
         }).execute()
-        logger.info(f"✅ Transaction: user={user_id}, type={trans_type}, amount={amount}")
+        logger.info(f"Transaction created: user={user_id}, type={trans_type}, amount={amount}")
     except Exception as e:
-        logger.error(f"❌ Transaction failed: {e}")
+        logger.error(f"Transaction failed: {e}")
 
 def create_user(user_id: int, first_name: str, username: str = None, referrer_id: int = None):
     user_data = {
@@ -189,47 +174,33 @@ def create_user(user_id: int, first_name: str, username: str = None, referrer_id
                 }).execute()
                 
                 asyncio.create_task(send_referral_notification(referrer_id, first_name, new_referrals))
-                logger.info(f"✅ Referral processed: {first_name} → {referrer_id}")
+                logger.info(f"✅ Referral processed: {first_name} -> {referrer_id}")
         except Exception as e:
             logger.error(f"❌ Referral failed: {e}")
 
-# ✅ FIX #3: BETTER ERROR LOGGING IN API ENDPOINT
+# ✅ FIXED FASTAPI ENDPOINT - ACCEPTS ALL RESULTS
 @app_fastapi.post("/cashyads/ad-completed")
 async def ad_completed(request: Request):
     try:
         data = await request.json()
-        user_id = data.get('user_id')
+        user_id = int(data.get('user_id'))
         result = data.get('result', '').lower()
-
-        # ✅ FIX: Validate user_id
-        if not user_id or not isinstance(user_id, int):
-            logger.error(f"❌ Invalid user_id: {user_id}")
-            return JSONResponse({"success": False, "message": "Invalid user_id"}, status_code=400)
 
         logger.info(f"🎬 Ad webhook: user={user_id}, result={result}, data={data}")
 
-        # Accept all success results
+        # ✅ FIXED: Accept ALL success results from Mini App
         success_results = {
             'completed', 'success', 'video_completed', 'full_video_complete', 
             'video_viewed', 'full_video', 'viewed', 'test', 'debug'
         }
 
         if result in success_results:
-            # ✅ Check if user exists
-            if not get_user(user_id):
-                logger.error(f"❌ User {user_id} NOT FOUND in database")
-                return JSONResponse({"success": False, "message": "User not found"}, status_code=404)
-
             ad_reward = random.randint(3, 5)
 
             # UPDATE BALANCE
-            new_balance = increment_field(user_id, 'balance', ad_reward)
+            increment_field(user_id, 'balance', ad_reward)
             increment_field(user_id, 'total_earnings', ad_reward)
             increment_field(user_id, 'ads_watched', 1)
-
-            if new_balance is None:
-                logger.error(f"❌ Failed to update balance for user {user_id}")
-                return JSONResponse({"success": False, "message": "Balance update failed"}, status_code=500)
 
             # REFERRAL COMMISSION
             stats = get_user_stats(user_id)
@@ -257,8 +228,8 @@ async def ad_completed(request: Request):
         return JSONResponse({"success": False, "message": f"Invalid result: {result}"})
 
     except Exception as e:
-        logger.error(f"❌ Ad endpoint ERROR: {e}")
-        return JSONResponse({"success": False, "message": "Server error"}, status_code=500)
+        logger.error(f"❌ Ad endpoint ERROR: {e}, data={await request.json()}")
+        raise HTTPException(status_code=500, detail="Server error")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global app
@@ -273,34 +244,29 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if not get_user(user_id):
         create_user(user_id, user.first_name, user.username, referrer_id)
-
+    
     stats = get_user_stats(user_id)
     await update.message.reply_text(
-        f"Welcome {user.first_name}!\n\n"
-        f"CashyAds v8.1 (Fixed Balance Update)\n\n"
-        f"Balance: ₹{stats['balance']:.2f}\n"
-        f"Referrals: {stats['referrals']}\n\n"
-        f"Start earning now!",
+        f"👋 Welcome {user.first_name}!\n\n"
+        f"💰 **CashyAds v8.0** (Video Ads + API Fixed)\n\n"
+        f"💵 Balance: ₹{stats['balance']:.2f}\n"
+        f"👥 Referrals: {stats['referrals']}\n\n"
+        f"🚀 Start earning now!",
         reply_markup=create_main_keyboard(),
         parse_mode='Markdown'
     )
 
-
-# ←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←
-# This function MUST start at column 0 (no spaces or tabs before it)
 async def handle_watch_ads(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    api_url = f"http://{VPS_IP}:{API_PORT}/cashyads/ad-completed"
-    mini_app_url = f"https://teleadviewer.pages.dev/?api={api_url}&user_id={user_id}"  # YOUR CLOUDFLARE
-
+    mini_app_url = "https://teleadviewer.pages.dev/"  # YOUR CLOUDFLARE
+    
     await update.message.reply_text(
-        f"Premium Video Ads (Fixed v8.1)\n\n"
-        f"Watch ONE video ad (25s)\n"
-        f"Earn ₹3-5 GUARANTEED\n"
-        f"5% commission to referrer\n\n"
-        f"OPEN VIDEO ADS",
+        f"📱 **Premium Video Ads** (Fixed v8.0)\n\n"
+        f"🎥 Watch **ONE** video ad (25s)\n"
+        f"💰 **Earn ₹3-5 GUARANTEED**\n"
+        f"👥 **5% commission** to referrer\n\n"
+        f"🔥 **OPEN VIDEO ADS** 👇",
         reply_markup=InlineKeyboardMarkup([
-            InlineKeyboardButton("WATCH VIDEO AD", web_app={"url": mini_app_url})
+            [InlineKeyboardButton("🎬 WATCH VIDEO AD", web_app={"url": mini_app_url})]
         ]),
         parse_mode='Markdown'
     )
@@ -511,12 +477,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("👇 Use the buttons below!", reply_markup=create_main_keyboard())
 
 def run_api_server():
-    """Run FastAPI server on port 8001"""
-    uvicorn.run(app_fastapi, host="0.0.0.0", port=API_PORT, log_level="info")
+    """Run FastAPI server on port 8000"""
+    uvicorn.run(app_fastapi, host="0.0.0.0", port=8000, log_level="info")
 
 def main():
     global app
-    logger.info("🤖 CashyAds v8.1 - FIXED Balance Update + CORS")
+    logger.info("🤖 CashyAds v8.0 - FIXED API + Video Ads")
     
     # Telegram Bot
     app = Application.builder().token(BOT_TOKEN).build()
@@ -529,7 +495,7 @@ def main():
     # API Server
     api_thread = threading.Thread(target=run_api_server, daemon=True)
     api_thread.start()
-    logger.info(f"🌐 API: http://{VPS_IP}:{API_PORT}/cashyads/ad-completed")
+    logger.info(f"🌐 API: http://{VPS_IP}:8000/cashyads/ad-completed")
     
     logger.info("✅ Bot + API Running...")
     app.run_polling(drop_pending_updates=True)
