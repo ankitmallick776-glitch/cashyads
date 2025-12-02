@@ -477,8 +477,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("👇 Use the buttons below!", reply_markup=create_main_keyboard())
 
 def run_api_server():
-    """Run FastAPI server on port 8000"""
-    uvicorn.run(app_fastapi, host="0.0.0.0", port=8000, log_level="info")
+    """Run FastAPI WITHOUT SSL on port 8001"""
+    uvicorn.run(app_fastapi, host="0.0.0.0", port=8001, log_level="error")
 
 def main():
     global app
