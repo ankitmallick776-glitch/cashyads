@@ -271,33 +271,36 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             referrer_id = int(context.args[0][4:])
         except: pass
     
-    if not get_user(user_id):
+        if not get_user(user_id):
         create_user(user_id, user.first_name, user.username, referrer_id)
-    
+
     stats = get_user_stats(user_id)
     await update.message.reply_text(
-        f"👋 Welcome {user.first_name}!\n\n"
-        f"💰 **CashyAds v8.1** (Fixed Balance Update)\n\n"
-        f"💵 Balance: ₹{stats['balance']:.2f}\n"
-        f"👥 Referrals: {stats['referrals']}\n\n"
-        f"🚀 Start earning now!",
+        f"Welcome {user.first_name}!\n\n"
+        f"CashyAds v8.1 (Fixed Balance Update)\n\n"
+        f"Balance: ₹{stats['balance']:.2f}\n"
+        f"Referrals: {stats['referrals']}\n\n"
+        f"Start earning now!",
         reply_markup=create_main_keyboard(),
         parse_mode='Markdown'
     )
 
-    async def handle_watch_ads(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+# ←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←
+# This function MUST start at column 0 (no spaces or tabs before it)
+async def handle_watch_ads(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     api_url = f"http://{VPS_IP}:{API_PORT}/cashyads/ad-completed"
-    mini_app_url = f"https://teleadviewer.pages.dev/?api={api_url}&user_id={user_id}"  # NEW  # YOUR CLOUDFLARE
-    
+    mini_app_url = f"https://teleadviewer.pages.dev/?api={api_url}&user_id={user_id}"  # YOUR CLOUDFLARE
+
     await update.message.reply_text(
-        f"📱 **Premium Video Ads** (Fixed v8.1)\n\n"
-        f"🎥 Watch **ONE** video ad (25s)\n"
-        f"💰 **Earn ₹3-5 GUARANTEED**\n"
-        f"👥 **5% commission** to referrer\n\n"
-        f"🔥 **OPEN VIDEO ADS** 👇",
+        f"Premium Video Ads (Fixed v8.1)\n\n"
+        f"Watch ONE video ad (25s)\n"
+        f"Earn ₹3-5 GUARANTEED\n"
+        f"5% commission to referrer\n\n"
+        f"OPEN VIDEO ADS",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🎬 WATCH VIDEO AD", web_app={"url": mini_app_url})]
+            [InlineKeyboardButton("WATCH VIDEO AD", web_app=WebAppInfo(url=mini_app_url))]
         ]),
         parse_mode='Markdown'
     )
