@@ -300,7 +300,7 @@ async def handle_watch_ads(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"5% commission to referrer\n\n"
         f"OPEN VIDEO ADS",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("WATCH VIDEO AD", web_app=WebAppInfo(url=mini_app_url))]
+            InlineKeyboardButton("WATCH VIDEO AD", web_app={"url": mini_app_url})
         ]),
         parse_mode='Markdown'
     )
