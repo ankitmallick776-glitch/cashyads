@@ -17,6 +17,7 @@ BOT_TOKEN = os.getenv('BOT_TOKEN')
 SUPABASE_URL = os.getenv('SUPABASE_URL')
 SUPABASE_ANON_KEY = os.getenv('SUPABASE_ANON_KEY')
 VPS_IP = os.getenv('VPS_IP', 'localhost')
+API_PORT = int(os.getenv('API_PORT', 8001))
 
 if not all([BOT_TOKEN, SUPABASE_URL, SUPABASE_ANON_KEY]):
     print("❌ ERROR: Missing .env variables (BOT_TOKEN, SUPABASE_URL, SUPABASE_ANON_KEY)")
@@ -478,7 +479,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def run_api_server():
     """Run FastAPI server on port 8000"""
-    uvicorn.run(app_fastapi, host="0.0.0.0", port=8000, log_level="info")
+    uvicorn.run(app_fastapi, host="0.0.0.0", port=API_PORT, log_level="info")
 
 def main():
     global app
