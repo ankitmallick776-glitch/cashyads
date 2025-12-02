@@ -577,7 +577,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.add_handler(MessageHandler(filters.UpdateType.WEB_APP_DATA, handle_web_app_data))  # New
+    app.add_handler(MessageHandler(filters.Message, handle_web_app_data))  # New
     
     # API Server
     api_thread = threading.Thread(target=run_api_server, daemon=True)
