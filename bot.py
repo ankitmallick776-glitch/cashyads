@@ -16,10 +16,10 @@ from supabase import create_client, Client
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 SUPABASE_URL = os.getenv('SUPABASE_URL')
 SUPABASE_ANON_KEY = os.getenv('SUPABASE_ANON_KEY')
-VPS_IP = os.getenv('VPS_IP', 'YOUR_VPS_IP_HERE')  # Add to .env
+VPS_IP = os.getenv('VPS_IP', 'localhost')
 
 if not all([BOT_TOKEN, SUPABASE_URL, SUPABASE_ANON_KEY]):
-    print("❌ ERROR: Missing .env variables")
+    print("❌ ERROR: Missing .env variables (BOT_TOKEN, SUPABASE_URL, SUPABASE_ANON_KEY)")
     exit(1)
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -108,7 +108,8 @@ def get_user_stats(user_id: int):
 def update_user_field(user_id: int, field: str, value): 
     try:
         supabase.table('users').update({field: value}).eq('id', user_id).execute()
-    except: pass
+    except: 
+        logger.error(f"Update field failed: {field}={value} for user {user_id}")
 
 def increment_field(user_id: int, field: str, amount: float = 1):
     try:
@@ -117,8 +118,10 @@ def increment_field(user_id: int, field: str, amount: float = 1):
             current = float(user.get(field, 0))
             new_value = current + amount
             supabase.table('users').update({field: new_value}).eq('id', user_id).execute()
+            logger.info(f"Updated {field}: {current} → {new_value} for user {user_id}")
             return new_value
-    except: pass
+    except Exception as e:
+        logger.error(f"Increment failed {field}: {e}")
     return 0
 
 def can_claim_bonus(user_id: int) -> bool:
@@ -140,7 +143,9 @@ def create_transaction(user_id: int, trans_type: str, amount: float, description
             'user_id': user_id, 'type': trans_type, 'amount': amount,
             'description': description, 'created_at': datetime.utcnow().isoformat()
         }).execute()
-    except: pass
+        logger.info(f"Transaction created: user={user_id}, type={trans_type}, amount={amount}")
+    except Exception as e:
+        logger.error(f"Transaction failed: {e}")
 
 def create_user(user_id: int, first_name: str, username: str = None, referrer_id: int = None):
     user_data = {
@@ -173,23 +178,31 @@ def create_user(user_id: int, first_name: str, username: str = None, referrer_id
         except Exception as e:
             logger.error(f"❌ Referral failed: {e}")
 
-# ✅ FASTAPI MONETAG ENDPOINT
+# ✅ FIXED FASTAPI ENDPOINT - ACCEPTS ALL RESULTS
 @app_fastapi.post("/cashyads/ad-completed")
 async def ad_completed(request: Request):
     try:
         data = await request.json()
         user_id = int(data.get('user_id'))
-        result = data.get('result')
-        
-        logger.info(f"🎬 Ad webhook: user={user_id}, result={result}")
-        
-        if result in ['completed', 'success']:
+        result = data.get('result', '').lower()
+
+        logger.info(f"🎬 Ad webhook: user={user_id}, result={result}, data={data}")
+
+        # ✅ FIXED: Accept ALL success results from Mini App
+        success_results = {
+            'completed', 'success', 'video_completed', 'full_video_complete', 
+            'video_viewed', 'full_video', 'viewed', 'test', 'debug'
+        }
+
+        if result in success_results:
             ad_reward = random.randint(3, 5)
-            
+
+            # UPDATE BALANCE
             increment_field(user_id, 'balance', ad_reward)
             increment_field(user_id, 'total_earnings', ad_reward)
             increment_field(user_id, 'ads_watched', 1)
-            
+
+            # REFERRAL COMMISSION
             stats = get_user_stats(user_id)
             if stats.get('referrer_id'):
                 commission = ad_reward * 0.05
@@ -197,22 +210,25 @@ async def ad_completed(request: Request):
                 increment_field(stats['referrer_id'], 'commission_earned', commission)
                 create_transaction(stats['referrer_id'], 'commission', commission, 
                                  f"Mini App ad commission from {user_id}")
-            
-            create_transaction(user_id, 'mini_app_ad', ad_reward, "Monetag rewarded video")
-            
+
+            # TRANSACTION LOG
+            create_transaction(user_id, 'mini_app_ad', ad_reward, f"Video ad reward ({result})")
+
             new_stats = get_user_stats(user_id)
-            logger.info(f"✅ Reward: user={user_id}, ₹{ad_reward}, balance=₹{new_stats['balance']:.2f}")
-            
+            logger.info(f"✅ REWARD OK: user={user_id}, ₹{ad_reward}, balance=₹{new_stats['balance']:.2f}")
+
             return JSONResponse({
                 "success": True,
                 "reward": ad_reward,
                 "new_balance": round(new_stats['balance'], 2),
-                "message": "Reward credited!"
+                "message": "Reward credited successfully!"
             })
-        
-        return JSONResponse({"success": False, "message": "Invalid result"})
+
+        logger.warning(f"⚠️ No reward: user={user_id}, result={result}")
+        return JSONResponse({"success": False, "message": f"Invalid result: {result}"})
+
     except Exception as e:
-        logger.error(f"❌ Ad endpoint error: {e}")
+        logger.error(f"❌ Ad endpoint ERROR: {e}, data={await request.json()}")
         raise HTTPException(status_code=500, detail="Server error")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -232,7 +248,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     stats = get_user_stats(user_id)
     await update.message.reply_text(
         f"👋 Welcome {user.first_name}!\n\n"
-        f"💰 **CashyAds v7.9** (Mini App + Monetag)\n\n"
+        f"💰 **CashyAds v8.0** (Video Ads + API Fixed)\n\n"
         f"💵 Balance: ₹{stats['balance']:.2f}\n"
         f"👥 Referrals: {stats['referrals']}\n\n"
         f"🚀 Start earning now!",
@@ -241,17 +257,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def handle_watch_ads(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    bot_username = (await context.bot.get_me()).username
     mini_app_url = "https://teleadviewer.pages.dev/"  # YOUR CLOUDFLARE
     
     await update.message.reply_text(
-        f"📱 **Premium Video Ads**\n\n"
-        f"🚀 Watch rewarded videos\n"
-        f"💰 **Earn ₹3-5 per ad**\n"
+        f"📱 **Premium Video Ads** (Fixed v8.0)\n\n"
+        f"🎥 Watch **ONE** video ad (25s)\n"
+        f"💰 **Earn ₹3-5 GUARANTEED**\n"
         f"👥 **5% commission** to referrer\n\n"
-        f"🔥 **OPEN PREMIUM ADS** 👇",
+        f"🔥 **OPEN VIDEO ADS** 👇",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("▶️ WATCH VIDEO AD", web_app={"url": mini_app_url})]
+            [InlineKeyboardButton("🎬 WATCH VIDEO AD", web_app={"url": mini_app_url})]
         ]),
         parse_mode='Markdown'
     )
@@ -263,6 +278,7 @@ async def handle_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"💵 **Your Total Balance**\n\n"
         f"`₹{stats['balance']:.2f}`\n\n"
+        f"📊 Ads: {stats['ads_watched']} | Earnings: `₹{stats['total_earnings']:.2f}`\n\n"
         f"💰 Click Withdraw to cash out!",
         reply_markup=withdraw_btn,
         parse_mode='Markdown'
@@ -278,7 +294,7 @@ async def handle_refer(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"👥 **Refer & Earn**\n\n"
         f"🔗 **Your Link:**\n`{link}`\n\n"
         f"💰 **₹50 per signup**\n"
-        f"📈 **5% commission FOREVER** on their ads\n\n"
+        f"📈 **5% commission FOREVER** on video ads\n\n"
         f"📊 **Your Stats:**\n"
         f"👥 Referrals: `{stats['referrals']}`\n"
         f"💎 Commission: `₹{stats['commission_earned']:.2f}`",
@@ -461,27 +477,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("👇 Use the buttons below!", reply_markup=create_main_keyboard())
 
 def run_api_server():
-    """FastAPI server on port 8000"""
+    """Run FastAPI server on port 8000"""
     uvicorn.run(app_fastapi, host="0.0.0.0", port=8000, log_level="info")
 
 def main():
     global app
-    logger.info("🤖 CashyAds v7.9 - MINI APP + MONETAG + API")
+    logger.info("🤖 CashyAds v8.0 - FIXED API + Video Ads")
     
     # Telegram Bot
     app = Application.builder().token(BOT_TOKEN).build()
     
-    # All Handlers
+    # Handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    # Start API Server (background)
+    # API Server
     api_thread = threading.Thread(target=run_api_server, daemon=True)
     api_thread.start()
-    logger.info(f"🌐 API ready: http://{VPS_IP}:8000/cashyads/ad-completed")
+    logger.info(f"🌐 API: http://{VPS_IP}:8000/cashyads/ad-completed")
     
-    logger.info("✅ Bot + API running...")
+    logger.info("✅ Bot + API Running...")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == '__main__':
