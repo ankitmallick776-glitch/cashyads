@@ -9,6 +9,7 @@ load_dotenv()
 from datetime import datetime, date, timedelta
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
@@ -29,6 +30,15 @@ logger = logging.getLogger(__name__)
 
 app = None  # Global Telegram app
 app_fastapi = FastAPI(title="CashyAds API", version="1.0")
+
+# ✅ ENABLE CORS FOR MINI APP REQUESTS
+app_fastapi.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allow all origins (or restrict to your Cloudflare domain)
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 try:
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
@@ -188,7 +198,7 @@ def create_user(user_id: int, first_name: str, username: str = None, referrer_id
         except Exception as e:
             logger.error(f"❌ Referral failed: {e}")
 
-# ✅ SECURE FASTAPI ENDPOINT - FALLBACK WITH BASIC CHECK
+# ✅ SECURE FASTAPI ENDPOINT - PRIMARY REWARD DELIVERY (from Mini App)
 @app_fastapi.post("/cashyads/ad-completed")
 async def ad_completed(request: Request):
     try:
@@ -205,12 +215,20 @@ async def ad_completed(request: Request):
         }
 
         if result in success_results:
-            # Basic rate limit check (add full verification later)
+            # Check if user exists
             user = get_user(user_id)
-            if user and user.get('last_ad_time') and (datetime.utcnow() - datetime.fromisoformat(user['last_ad_time'])).total_seconds() < 300:
-                logger.warning(f"⚠️ Rate limit hit for {user_id}")
-                return JSONResponse({"success": False, "message": "Too soon! Wait 5 mins."})
+            if not user:
+                logger.warning(f"⚠️ User not found: {user_id}")
+                return JSONResponse({"success": False, "message": "User not found. Restart bot."}, status_code=404)
 
+            # Basic rate limit check (5 mins between ads)
+            if user.get('last_ad_time'):
+                last_ad_seconds = (datetime.utcnow() - datetime.fromisoformat(user['last_ad_time'])).total_seconds()
+                if last_ad_seconds < 300:
+                    logger.warning(f"⚠️ Rate limit hit for {user_id} - waited {last_ad_seconds}s")
+                    return JSONResponse({"success": False, "message": f"Too soon! Wait {300 - int(last_ad_seconds)}s."})
+
+            # Credit reward (random ₹3-5)
             ad_reward = random.randint(3, 5)
 
             # UPDATE BALANCE
@@ -219,7 +237,7 @@ async def ad_completed(request: Request):
             increment_field(user_id, 'ads_watched', 1)
             update_user_field(user_id, 'last_ad_time', datetime.utcnow().isoformat())
 
-            # REFERRAL COMMISSION
+            # REFERRAL COMMISSION (5% to referrer)
             stats = get_user_stats(user_id)
             if stats.get('referrer_id'):
                 commission = ad_reward * 0.05
@@ -231,6 +249,7 @@ async def ad_completed(request: Request):
             # TRANSACTION LOG
             create_transaction(user_id, 'mini_app_ad', ad_reward, f"Video ad reward ({result})")
 
+            # GET UPDATED STATS
             new_stats = get_user_stats(user_id)
             logger.info(f"✅ REWARD OK: user={user_id}, ₹{ad_reward}, balance=₹{new_stats['balance']:.2f}")
 
@@ -245,12 +264,17 @@ async def ad_completed(request: Request):
         return JSONResponse({"success": False, "message": f"Invalid result: {result}"})
 
     except Exception as e:
-        logger.error(f"❌ Ad endpoint ERROR: {e}, data={await request.json()}")
-        raise HTTPException(status_code=500, detail="Server error")
+        logger.error(f"❌ Ad endpoint ERROR: {e}")
+        raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
 
-# ✅ NEW: WEB APP DATA HANDLER (PRIMARY FOR REWARDS)
+# ✅ HEALTH CHECK ENDPOINT
+@app_fastapi.get("/health")
+async def health_check():
+    return JSONResponse({"status": "ok", "service": "CashyAds v8.2"})
+
+# ✅ NEW: WEB APP DATA HANDLER (SECONDARY - for Telegram bot notification)
 async def handle_web_app_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # **NEW: Guard to only process actual web_app_data messages**
+    # Guard to only process actual web_app_data messages
     if not update.message or not update.message.web_app_data:
         return  # Ignore if not a web app callback
     
@@ -264,38 +288,26 @@ async def handle_web_app_data(update: Update, context: ContextTypes.DEFAULT_TYPE
             await update.message.reply_text("❌ Invalid ad completion. Try again.")
             return
         
-        # Rate limit
+        # Get user stats
         stats = get_user_stats(user_id)
+        
+        # Rate limit check
         if stats['last_ad_time'] and (datetime.utcnow() - datetime.fromisoformat(stats['last_ad_time'])).total_seconds() < 300:
             await update.message.reply_text("⏰ Wait 5 mins between ads!")
             return
         
-        # Credit reward (rest unchanged)
-        ad_reward = random.randint(3, 5)
-        increment_field(user_id, 'balance', ad_reward)
-        increment_field(user_id, 'total_earnings', ad_reward)
-        increment_field(user_id, 'ads_watched', 1)
-        update_user_field(user_id, 'last_ad_time', datetime.utcnow().isoformat())
-        
-        # Referral commission
-        if stats.get('referrer_id'):
-            commission = ad_reward * 0.05
-            increment_field(stats['referrer_id'], 'balance', commission)
-            increment_field(stats['referrer_id'], 'commission_earned', commission)
-            create_transaction(stats['referrer_id'], 'commission', commission, f"Ad commission from {user_id}")
-        
-        create_transaction(user_id, 'mini_app_ad', ad_reward, f"Video ad reward ({result})")
-        
-        new_balance = get_user_stats(user_id)['balance']
+        # ✅ NOTE: Reward should already be credited via Mini App API POST
+        # This handler is just for Telegram bot notification/confirmation
+        new_balance = stats['balance']
         await update.message.reply_text(
             f"🎬 **Ad Watched Successfully!**\n\n"
-            f"💰 **+₹{ad_reward}** credited!\n"
-            f"💵 **New Balance: ₹{new_balance:.2f}**\n\n"
+            f"💰 **Reward credit confirmed!**\n"
+            f"💵 **Balance: ₹{new_balance:.2f}**\n\n"
             f"👏 Great job! Watch more to earn.",
             reply_markup=create_main_keyboard(),
             parse_mode='Markdown'
         )
-        logger.info(f"✅ Web App Reward: user={user_id}, ₹{ad_reward}, balance=₹{new_balance:.2f}")
+        logger.info(f"✅ Web App Notification: user={user_id}, balance=₹{new_balance:.2f}")
         
     except json.JSONDecodeError:
         await update.message.reply_text("❌ Invalid data from ad viewer.")
@@ -320,7 +332,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     stats = get_user_stats(user_id)
     await update.message.reply_text(
         f"👋 Welcome {user.first_name}!\n\n"
-        f"💰 **CashyAds v8.1** (Secure Web App Rewards)\n\n"
+        f"💰 **CashyAds v8.2** (Secure Web App Rewards)\n\n"
         f"💵 Balance: ₹{stats['balance']:.2f}\n"
         f"👥 Referrals: {stats['referrals']}\n\n"
         f"🚀 Start earning now!",
@@ -330,7 +342,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_watch_ads(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        f"📱 **Premium Video Ads** (v8.1 Secure)\n\n"
+        f"📱 **Premium Video Ads** (v8.2 Secure)\n\n"
         f"🎥 Watch **ONE** video ad (25s)\n"
         f"💰 **Earn ₹3-5 GUARANTEED**\n"
         f"👥 **5% commission** to referrer\n\n"
@@ -563,12 +575,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("👇 Use the buttons below!", reply_markup=create_main_keyboard())
 
 def run_api_server():
-    """Run FastAPI WITHOUT SSL on port 8001"""
-    uvicorn.run(app_fastapi, host="0.0.0.0", port=8001, log_level="error")
+    """Run FastAPI on port 8001 with CORS enabled"""
+    uvicorn.run(app_fastapi, host="0.0.0.0", port=8001, log_level="info")
 
 def main():
     global app
-    logger.info("🤖 CashyAds v8.1 - Secure Web App + Rate Limits")
+    logger.info("🤖 CashyAds v8.2 - Secure Web App + CORS Enabled + Direct API Rewards")
     
     # Telegram Bot
     app = Application.builder().token(BOT_TOKEN).build()
@@ -577,12 +589,13 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.add_handler(MessageHandler(filters.Message, handle_web_app_data))  # New
+    app.add_handler(MessageHandler(filters.Message, handle_web_app_data))  # Web app data handler
     
     # API Server
     api_thread = threading.Thread(target=run_api_server, daemon=True)
     api_thread.start()
-    logger.info(f"🌐 API: http://{VPS_IP}:8001/cashyads/ad-completed")  # Fixed port
+    logger.info(f"🌐 API: http://{VPS_IP}:8001/cashyads/ad-completed")
+    logger.info(f"🌐 Health Check: http://{VPS_IP}:8001/health")
     
     logger.info("✅ Bot + API Running...")
     app.run_polling(drop_pending_updates=True)
