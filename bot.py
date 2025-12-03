@@ -2,35 +2,35 @@ import logging
 import os
 import asyncio
 import random
-import threading
-import json
-from dotenv import load_dotenv
-load_dotenv()
+import time
 from datetime import datetime, date
+from dotenv import load_dotenv
+import uvicorn
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-import uvicorn
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 from supabase import create_client, Client
+from asyncio_throttle import Throttle
 
+load_dotenv()
+
+# Config
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 SUPABASE_URL = os.getenv('SUPABASE_URL')
 SUPABASE_ANON_KEY = os.getenv('SUPABASE_ANON_KEY')
+MINI_APP_URL = os.getenv('MINI_APP_URL', 'https://your-mini-app.pages.dev/')
 VPS_IP = os.getenv('VPS_IP', 'localhost')
-MINI_APP_URL = os.getenv('MINI_APP_URL', 'https://your-mini-app.pages.dev/')  # UPDATE THIS
 
 if not all([BOT_TOKEN, SUPABASE_URL, SUPABASE_ANON_KEY]):
-    print("❌ ERROR: Missing .env variables")
-    exit(1)
+    raise ValueError("❌ Missing .env variables")
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-app = None
-app_fastapi = FastAPI(title="CashyAds v9.1", version="9.1")
-
+# FastAPI App
+app_fastapi = FastAPI(title="CashyAds v9.3", version="9.3 - UNLIMITED ADS")
 app_fastapi.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -38,11 +38,15 @@ app_fastapi.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
-logger.info("✅ Supabase connected")
 
-# KEYBOARDS
+# Rate limiter (commands only)
+command_limiter = Throttle(5, 60)
+
+# ✅ PENDING REWARDS QUEUE (for bot DM notifications)
+pending_rewards = {}
+
+# Keyboards
 def create_main_keyboard():
     return ReplyKeyboardMarkup([
         [KeyboardButton("💰 Watch Ads")],
@@ -61,16 +65,46 @@ def create_withdraw_keyboard():
         [InlineKeyboardButton("❌ Cancel", callback_data="withdraw_cancel")]
     ])
 
-# DATABASE FUNCTIONS
-def get_user(user_id: int):
+# Database Functions
+async def get_user(user_id: int):
     try:
         response = supabase.table('users').select('*').eq('id', user_id).execute()
         return response.data[0] if response.data else None
-    except:
+    except Exception as e:
+        logger.error(f"DB get_user {user_id}: {e}")
         return None
 
-def get_user_stats(user_id: int):
-    user = get_user(user_id)
+async def update_user_atomic(user_id: int, data: dict):
+    try:
+        supabase.table('users').upsert({**data, 'id': user_id}).execute()
+        return True
+    except Exception as e:
+        logger.error(f"DB update {user_id}: {e}")
+        return False
+
+def create_user(user_id: int, first_name: str, username: str = None, referrer_id: int = None):
+    if referrer_id == user_id:
+        referrer_id = None
+    user_data = {
+        'id': user_id, 'telegram_username': username, 'first_name': first_name,
+        'balance': 0.0, 'referrals': 0, 'ads_watched': 0, 'total_earnings': 0.0,
+        'commission_earned': 0.0, 'bonus_claimed': False, 'last_bonus_date': None,
+        'referrer_id': referrer_id, 'created_at': datetime.utcnow().isoformat()
+    }
+    try:
+        supabase.table('users').insert(user_data).execute()
+        if referrer_id:
+            supabase.table('users').update({
+                'referrals': supabase.raw('referrals + 1'),
+                'balance': supabase.raw('balance + 50')
+            }).eq('id', referrer_id).execute()
+        return True
+    except Exception as e:
+        logger.error(f"Create user {user_id}: {e}")
+        return False
+
+async def get_user_stats(user_id: int):
+    user = await get_user(user_id)
     if user:
         return {
             'balance': float(user.get('balance', 0)),
@@ -79,46 +113,29 @@ def get_user_stats(user_id: int):
             'total_earnings': float(user.get('total_earnings', 0)),
             'commission_earned': float(user.get('commission_earned', 0)),
             'bonus_claimed': user.get('bonus_claimed', False),
-            'last_bonus_date': user.get('last_bonus_date'),
-            'referrer_id': user.get('referrer_id'),
-            'last_ad_time': user.get('last_ad_time')
+            'last_bonus_date': user.get('last_bonus_date')
         }
-    return {'balance': 0, 'referrals': 0, 'ads_watched': 0, 'total_earnings': 0, 
-            'commission_earned': 0, 'bonus_claimed': False, 'last_bonus_date': None, 
-            'referrer_id': None, 'last_ad_time': None}
+    return {'balance': 0, 'referrals': 0, 'ads_watched': 0, 'total_earnings': 0, 'commission_earned': 0}
 
-def update_user(user_id: int, data: dict):
-    try:
-        supabase.table('users').update(data).eq('id', user_id).execute()
-    except Exception as e:
-        logger.error(f"Update failed: {e}")
+# ✅ CHECK PENDING REWARDS → SEND BOT DM SUCCESS MESSAGE
+async def check_pending_rewards(context: ContextTypes.DEFAULT_TYPE, user_id: int):
+    if user_id in pending_rewards:
+        reward_data = pending_rewards.pop(user_id)
+        if time.time() - reward_data['timestamp'] < 60:
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🎬 Watch More Ads", web_app=WebAppInfo(url=MINI_APP_URL))]
+            ])
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=f"✅ **Ad Watched Successfully!**\n\n"
+                     f"💰 **+₹{reward_data['reward']:.2f}** added\n"
+                     f"💵 **New Balance: ₹{reward_data['balance']:.2f}**\n\n"
+                     f"🔥 Watch **UNLIMITED** more ads!",
+                reply_markup=keyboard,
+                parse_mode='Markdown'
+            )
 
-def increment_field(user_id: int, field: str, amount: float = 1):
-    try:
-        user = get_user(user_id)
-        if user:
-            current = float(user.get(field, 0))
-            new_value = current + amount
-            update_user(user_id, {field: new_value})
-            return new_value
-    except:
-        pass
-    return 0
-
-def create_user(user_id: int, first_name: str, username: str = None, referrer_id: int = None):
-    user_data = {
-        'id': user_id, 'telegram_username': username, 'first_name': first_name,
-        'balance': 0.0, 'referrals': 0, 'ads_watched': 0, 'total_earnings': 0.0,
-        'commission_earned': 0.0, 'bonus_claimed': False, 'last_bonus_date': None,
-        'referrer_id': referrer_id, 'last_ad_time': None, 'created_at': datetime.utcnow().isoformat()
-    }
-    supabase.table('users').insert(user_data).execute()
-    
-    if referrer_id:
-        increment_field(referrer_id, 'balance', 50)
-        increment_field(referrer_id, 'referrals', 1)
-
-# ✅ MONETAG AD COMPLETION WEBHOOK - NO COOLDOWN!
+# ✅ MONETAG WEBHOOK - UNLIMITED ADS (queues bot notification)
 @app_fastapi.post("/cashyads/ad-completed")
 async def ad_completed(request: Request):
     try:
@@ -128,65 +145,83 @@ async def ad_completed(request: Request):
         
         logger.info(f"🎬 Ad webhook: user={user_id}, result={result}")
         
-        if result in {'completed', 'success', 'video_completed', 'full_video'}:
-            user = get_user(user_id)
-            if not user:
-                return JSONResponse({"success": False, "message": "User not found"}, status_code=404)
-            
-            # ✅ NO RATE LIMIT - UNLIMITED ADS ALLOWED!
-            
-            # Reward: ₹3-5 random
-            reward = random.uniform(3, 5)
-            
-            # Credit user
-            increment_field(user_id, 'balance', reward)
-            increment_field(user_id, 'total_earnings', reward)
-            increment_field(user_id, 'ads_watched', 1)
-            
-            # Referral commission 5%
-            stats = get_user_stats(user_id)
-            if stats.get('referrer_id'):
-                commission = reward * 0.05
-                increment_field(stats['referrer_id'], 'balance', commission)
-                increment_field(stats['referrer_id'], 'commission_earned', commission)
-            
-            stats = get_user_stats(user_id)
-            logger.info(f"✅ REWARD: user={user_id}, ₹{reward:.2f}, balance=₹{stats['balance']:.2f}")
-            
-            return JSONResponse({
-                "success": True, 
-                "reward": round(reward, 2), 
-                "new_balance": round(stats['balance'], 2)
-            })
+        if result not in {'completed', 'success', 'video_completed', 'full_video'}:
+            return JSONResponse({"success": False, "message": "Invalid result"})
         
-        return JSONResponse({"success": False, "message": "Invalid result"})
+        user = await get_user(user_id)
+        if not user:
+            return JSONResponse({"success": False, "message": "User not found"}, status_code=404)
+        
+        # 🔥 UNLIMITED REWARDS - NO COOLDOWN!
+        reward = round(random.uniform(3, 5), 2)
+        current_balance = float(user.get('balance', 0))
+        current_earnings = float(user.get('total_earnings', 0))
+        current_ads = int(user.get('ads_watched', 0))
+        
+        # Atomic update
+        success = await update_user_atomic(user_id, {
+            'balance': current_balance + reward,
+            'total_earnings': current_earnings + reward,
+            'ads_watched': current_ads + 1
+        })
+        
+        if not success:
+            return JSONResponse({"success": False, "message": "Database error"}, status_code=500)
+        
+        # Queue reward notification for NEXT user interaction
+        pending_rewards[user_id] = {
+            'reward': reward,
+            'balance': current_balance + reward,
+            'timestamp': time.time()
+        }
+        
+        # 5% referral commission
+        if user.get('referrer_id'):
+            commission = reward * 0.05
+            referrer = await get_user(user['referrer_id'])
+            if referrer:
+                await update_user_atomic(user['referrer_id'], {
+                    'balance': float(referrer.get('balance', 0)) + commission,
+                    'commission_earned': float(referrer.get('commission_earned', 0)) + commission
+                })
+        
+        logger.info(f"✅ REWARD QUEUED: user={user_id}, ₹{reward}, balance=₹{current_balance + reward:.2f}")
+        
+        return JSONResponse({"success": True, "reward": reward, "queued": True})
     except Exception as e:
-        logger.error(f"❌ Ad endpoint error: {e}")
+        logger.error(f"❌ Ad webhook error: {e}")
         raise HTTPException(status_code=500)
 
 @app_fastapi.get("/health")
 async def health():
-    return {"status": "ok", "service": "CashyAds v9.1 - UNLIMITED ADS"}
+    return {"status": "ok", "version": "9.3", "unlimited_ads": True}
 
-# HANDLERS
+# Bot Handlers (ALL check pending rewards first)
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    user_id = user.id
+    user_id = update.effective_user.id
+    
+    if not await command_limiter.acquire(user_id):
+        await update.message.reply_text("⏳ Too fast! Wait a moment.")
+        return
+    
+    await check_pending_rewards(context, user_id)
     
     referrer_id = None
     if context.args and context.args[0].startswith('ref_'):
         try:
             referrer_id = int(context.args[0][4:])
+            if referrer_id == user_id:
+                referrer_id = None
         except:
             pass
     
-    if not get_user(user_id):
-        create_user(user_id, user.first_name, user.username, referrer_id)
+    if not await get_user(user_id):
+        create_user(user_id, update.effective_user.first_name, update.effective_user.username, referrer_id)
     
-    stats = get_user_stats(user_id)
+    stats = await get_user_stats(user_id)
     await update.message.reply_text(
-        f"👋 **Welcome to CashyAds v9.1!**\n\n"
-        f"💰 **Watch UNLIMITED Ads → Earn NON-STOP**\n\n"
+        f"👋 **Welcome to CashyAds v9.3!**\n\n"
+        f"💰 **UNLIMITED Ads → NON-STOP Earnings**\n\n"
         f"💵 Balance: `₹{stats['balance']:.2f}`\n"
         f"📺 Ads: `{stats['ads_watched']}`\n"
         f"👥 Referrals: `{stats['referrals']}`\n\n"
@@ -195,9 +230,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def watch_ads(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await check_pending_rewards(context, update.effective_user.id)
     await update.message.reply_text(
-        "🎬 **UNLIMITED Premium Video Ads** (Monetag)\n\n"
-        f"💎 Watch **FULL video** → **Earn ₹3-5 INSTANTLY**\n"
+        "🎬 **UNLIMITED Premium Video Ads**\n\n"
+        f"💎 Watch **FULL video** → **₹3-5 INSTANTLY**\n"
         f"🔥 **NO LIMIT** - Watch as many as you want!\n\n"
         f"👇 **OPEN ADS NOW** 👇",
         reply_markup=InlineKeyboardMarkup([
@@ -207,24 +243,26 @@ async def watch_ads(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def handle_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    stats = get_user_stats(update.effective_user.id)
-    withdraw_btn = InlineKeyboardMarkup([[InlineKeyboardButton("💸 Withdraw", callback_data="withdraw")]])
+    await check_pending_rewards(context, update.effective_user.id)
+    user_id = update.effective_user.id
+    stats = await get_user_stats(user_id)
     
+    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("💸 Withdraw", callback_data="withdraw")]])
     await update.message.reply_text(
         f"💵 **Your Balance**\n\n"
         f"`₹{stats['balance']:.2f}`\n\n"
         f"📊 Ads: `{stats['ads_watched']}` | Total: `₹{stats['total_earnings']:.2f}`\n"
         f"👥 Referrals: `{stats['referrals']}`\n\n"
         f"💰 Keep watching ads to earn more!",
-        reply_markup=withdraw_btn,
-        parse_mode='Markdown'
+        reply_markup=keyboard, parse_mode='Markdown'
     )
 
 async def handle_refer(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    bot_username = (await context.bot.get_me()).username
+    await check_pending_rewards(context, update.effective_user.id)
     user_id = update.effective_user.id
-    stats = get_user_stats(user_id)
-
+    bot_username = (await context.bot.get_me()).username
+    stats = await get_user_stats(user_id)
+    
     link = f"https://t.me/{bot_username}?start=ref_{user_id}"
     await update.message.reply_text(
         f"👥 **Refer & Earn**\n\n"
@@ -234,28 +272,30 @@ async def handle_refer(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📊 **Your Stats:**\n"
         f"👥 Referrals: `{stats['referrals']}`\n"
         f"💎 Commission: `₹{stats['commission_earned']:.2f}`",
-        parse_mode='Markdown',
-        reply_markup=create_main_keyboard()
+        parse_mode='Markdown', reply_markup=create_main_keyboard()
     )
 
 async def handle_bonus(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await check_pending_rewards(context, update.effective_user.id)
     user_id = update.effective_user.id
     today = date.today().isoformat()
     
-    user = get_user(user_id)
+    user = await get_user(user_id)
     if user and not user.get('bonus_claimed', False) and user.get('last_bonus_date') != today:
         bonus = 5.0
-        increment_field(user_id, 'balance', bonus)
-        update_user(user_id, {'bonus_claimed': True, 'last_bonus_date': today})
-        
-        stats = get_user_stats(user_id)
+        current_balance = float(user.get('balance', 0))
+        await update_user_atomic(user_id, {
+            'balance': current_balance + bonus,
+            'bonus_claimed': True,
+            'last_bonus_date': today
+        })
+        stats = await get_user_stats(user_id)
         await update.message.reply_text(
             f"🎉 **Daily Bonus Claimed!**\n\n"
             f"💰 **+₹5.00**\n"
             f"💵 **New Balance: ₹{stats['balance']:.2f}**\n\n"
             f"✅ Reset tomorrow!",
-            reply_markup=create_main_keyboard(),
-            parse_mode='Markdown'
+            reply_markup=create_main_keyboard(), parse_mode='Markdown'
         )
     else:
         await update.message.reply_text(
@@ -263,11 +303,11 @@ async def handle_bonus(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "❌ Already claimed today!\n"
             "⏰ Resets at midnight\n\n"
             "💰 Watch ads for more earnings!",
-            reply_markup=create_main_keyboard(),
-            parse_mode='Markdown'
+            reply_markup=create_main_keyboard(), parse_mode='Markdown'
         )
 
 async def handle_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await check_pending_rewards(context, update.effective_user.id)
     try:
         response = supabase.table('users').select('first_name, balance').order('balance', desc=True).limit(10).execute()
         leaderboard = response.data
@@ -276,12 +316,14 @@ async def handle_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE)
         for i, user in enumerate(leaderboard, 1):
             msg += f"{i}. {user['first_name']} - ₹{float(user['balance']):.2f}\n"
         
-        await update.message.reply_text(msg + "\n🔥 Be #1! Watch more ads!", parse_mode='Markdown', reply_markup=create_main_keyboard())
+        await update.message.reply_text(msg + "\n🔥 Be #1! Watch more ads!", 
+                                       parse_mode='Markdown', reply_markup=create_main_keyboard())
     except:
         await update.message.reply_text("Leaderboard unavailable!", reply_markup=create_main_keyboard())
 
 async def handle_extra(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    stats = get_user_stats(update.effective_user.id)
+    await check_pending_rewards(context, update.effective_user.id)
+    stats = await get_user_stats(update.effective_user.id)
     await update.message.reply_text(
         f"⭐ **Your Stats**\n\n"
         f"💵 Balance: `₹{stats['balance']:.2f}`\n"
@@ -289,12 +331,35 @@ async def handle_extra(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"💸 Total: `₹{stats['total_earnings']:.2f}`\n"
         f"👥 Referrals: `{stats['referrals']}`\n"
         f"💎 Commission: `₹{stats['commission_earned']:.2f}`",
-        reply_markup=create_main_keyboard(),
-        parse_mode='Markdown'
+        reply_markup=create_main_keyboard(), parse_mode='Markdown'
     )
 
+async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await check_pending_rewards(context, update.effective_user.id)
+    query = update.callback_query
+    await query.answer()
+    
+    if query.data == "withdraw":
+        stats = await get_user_stats(query.from_user.id)
+        if stats['balance'] >= 100:
+            await query.edit_message_text("💸 **Withdrawal Options**\n\nMin ₹100", 
+                                        reply_markup=create_withdraw_keyboard())
+        else:
+            await query.edit_message_text(f"💵 **Minimum ₹100 to withdraw**\nCurrent: ₹{stats['balance']:.2f}")
+    elif query.data.startswith("withdraw_"):
+        if query.data == "withdraw_cancel":
+            await query.edit_message_text("❌ Cancelled", reply_markup=create_main_keyboard())
+        else:
+            await query.edit_message_text("💸 **Coming Soon!**\n\nWithdrawals via UPI/Paytm/Bank/USDT")
+    await query.message.reply_text("👇 Use menu:", reply_markup=create_main_keyboard())
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await check_pending_rewards(context, update.effective_user.id)
     text = update.message.text
+    user_id = update.effective_user.id
+    
+    if not await command_limiter.acquire(user_id):
+        return
     
     if text == "💰 Watch Ads":
         await watch_ads(update, context)
@@ -314,30 +379,32 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "💰 Watch **UNLIMITED ads**\n"
             "💵 Check balance\n"
             "👥 Refer friends",
-            reply_markup=create_main_keyboard(),
-            parse_mode='Markdown'
+            reply_markup=create_main_keyboard(), parse_mode='Markdown'
         )
 
-def run_api():
-    uvicorn.run(app_fastapi, host="0.0.0.0", port=8001, log_level="info")
+# Run FastAPI + Telegram Bot
+async def run_api():
+    config = uvicorn.Config(app_fastapi, host="0.0.0.0", port=8001, log_level="info")
+    server = uvicorn.Server(config)
+    await server.serve()
 
-def main():
-    global app
-    logger.info("🤖 CashyAds v9.1 - UNLIMITED ADS (No Cooldown)")
-    
-    app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    
-    api_thread = threading.Thread(target=run_api, daemon=True)
-    api_thread.start()
-    
-    logger.info(f"🌐 API: http://{VPS_IP}:8001/cashyads/ad-completed")
+async def main():
+    logger.info("🤖 CashyAds v9.3 - UNLIMITED ADS + BOT DM NOTIFICATIONS")
+    logger.info(f"🌐 Webhook: http://{VPS_IP}:8001/cashyads/ad-completed")
     logger.info(f"🌐 Health: http://{VPS_IP}:8001/health")
     logger.info(f"🌐 Mini App: {MINI_APP_URL}")
     
+    app = Application.builder().token(BOT_TOKEN).build()
+    
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(callback_handler))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
+    # Run API in background + Bot polling
+    api_task = asyncio.create_task(run_api())
+    
     logger.info("✅ Bot + API Running - UNLIMITED EARNINGS!")
-    app.run_polling(drop_pending_updates=True)
+    await app.run_polling(drop_pending_updates=True)
 
 if __name__ == '__main__':
-    main()
+    asyncio.run(main())
