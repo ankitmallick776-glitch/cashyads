@@ -12,7 +12,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 from supabase import create_client, Client
-from asyncio_throttle import Throttle
 
 load_dotenv()
 
@@ -40,8 +39,27 @@ app_fastapi.add_middleware(
 )
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
 
-# Rate limiter (commands only)
-command_limiter = Throttle(5, 60)
+# ✅ CUSTOM RATE LIMITER (no external deps)
+class SimpleRateLimiter:
+    def __init__(self, max_calls: int, time_window: int):
+        self.max_calls = max_calls
+        self.time_window = time_window
+        self.calls = {}  # user_id -> list of timestamps
+    
+    async def acquire(self, user_id: int) -> bool:
+        now = time.time()
+        if user_id not in self.calls:
+            self.calls[user_id] = []
+        
+        # Remove old calls
+        self.calls[user_id] = [t for t in self.calls[user_id] if now - t < self.time_window]
+        
+        if len(self.calls[user_id]) < self.max_calls:
+            self.calls[user_id].append(now)
+            return True
+        return False
+
+command_limiter = SimpleRateLimiter(5, 60)  # 5 commands/min
 
 # ✅ PENDING REWARDS QUEUE (for bot DM notifications)
 pending_rewards = {}
@@ -382,7 +400,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=create_main_keyboard(), parse_mode='Markdown'
         )
 
-# Run FastAPI + Telegram Bot
+# Run FastAPI + Telegram Bot (FIXED async issue)
 async def run_api():
     config = uvicorn.Config(app_fastapi, host="0.0.0.0", port=8001, log_level="info")
     server = uvicorn.Server(config)
@@ -400,9 +418,7 @@ async def main():
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    # Run API in background + Bot polling
-    api_task = asyncio.create_task(run_api())
-    
+    # Run bot polling (API runs on separate port)
     logger.info("✅ Bot + API Running - UNLIMITED EARNINGS!")
     await app.run_polling(drop_pending_updates=True)
 
