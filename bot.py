@@ -3,6 +3,7 @@ import os
 import asyncio
 import random
 import time
+import threading
 from datetime import datetime, date
 from dotenv import load_dotenv
 import uvicorn
@@ -29,7 +30,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger(__name__)
 
 # FastAPI App
-app_fastapi = FastAPI(title="CashyAds v9.3", version="9.3 - UNLIMITED ADS")
+app_fastapi = FastAPI(title="CashyAds v9.4", version="9.4 - FIXED")
 app_fastapi.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -39,19 +40,18 @@ app_fastapi.add_middleware(
 )
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
 
-# ✅ CUSTOM RATE LIMITER (no external deps)
+# ✅ CUSTOM RATE LIMITER
 class SimpleRateLimiter:
     def __init__(self, max_calls: int, time_window: int):
         self.max_calls = max_calls
         self.time_window = time_window
-        self.calls = {}  # user_id -> list of timestamps
+        self.calls = {}
     
     async def acquire(self, user_id: int) -> bool:
         now = time.time()
         if user_id not in self.calls:
             self.calls[user_id] = []
         
-        # Remove old calls
         self.calls[user_id] = [t for t in self.calls[user_id] if now - t < self.time_window]
         
         if len(self.calls[user_id]) < self.max_calls:
@@ -59,9 +59,9 @@ class SimpleRateLimiter:
             return True
         return False
 
-command_limiter = SimpleRateLimiter(5, 60)  # 5 commands/min
+command_limiter = SimpleRateLimiter(5, 60)
 
-# ✅ PENDING REWARDS QUEUE (for bot DM notifications)
+# ✅ PENDING REWARDS QUEUE
 pending_rewards = {}
 
 # Keyboards
@@ -143,17 +143,20 @@ async def check_pending_rewards(context: ContextTypes.DEFAULT_TYPE, user_id: int
             keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("🎬 Watch More Ads", web_app=WebAppInfo(url=MINI_APP_URL))]
             ])
-            await context.bot.send_message(
-                chat_id=user_id,
-                text=f"✅ **Ad Watched Successfully!**\n\n"
-                     f"💰 **+₹{reward_data['reward']:.2f}** added\n"
-                     f"💵 **New Balance: ₹{reward_data['balance']:.2f}**\n\n"
-                     f"🔥 Watch **UNLIMITED** more ads!",
-                reply_markup=keyboard,
-                parse_mode='Markdown'
-            )
+            try:
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=f"✅ **Ad Watched Successfully!**\n\n"
+                         f"💰 **+₹{reward_data['reward']:.2f}** added\n"
+                         f"💵 **New Balance: ₹{reward_data['balance']:.2f}**\n\n"
+                         f"🔥 Watch **UNLIMITED** more ads!",
+                    reply_markup=keyboard,
+                    parse_mode='Markdown'
+                )
+            except:
+                pass  # User blocked bot or chat not found
 
-# ✅ MONETAG WEBHOOK - UNLIMITED ADS (queues bot notification)
+# ✅ WEBHOOK ENDPOINTS
 @app_fastapi.post("/cashyads/ad-completed")
 async def ad_completed(request: Request):
     try:
@@ -170,13 +173,12 @@ async def ad_completed(request: Request):
         if not user:
             return JSONResponse({"success": False, "message": "User not found"}, status_code=404)
         
-        # 🔥 UNLIMITED REWARDS - NO COOLDOWN!
+        # 🔥 UNLIMITED REWARDS
         reward = round(random.uniform(3, 5), 2)
         current_balance = float(user.get('balance', 0))
         current_earnings = float(user.get('total_earnings', 0))
         current_ads = int(user.get('ads_watched', 0))
         
-        # Atomic update
         success = await update_user_atomic(user_id, {
             'balance': current_balance + reward,
             'total_earnings': current_earnings + reward,
@@ -186,14 +188,14 @@ async def ad_completed(request: Request):
         if not success:
             return JSONResponse({"success": False, "message": "Database error"}, status_code=500)
         
-        # Queue reward notification for NEXT user interaction
+        # Queue reward notification
         pending_rewards[user_id] = {
             'reward': reward,
             'balance': current_balance + reward,
             'timestamp': time.time()
         }
         
-        # 5% referral commission
+        # Referral commission 5%
         if user.get('referrer_id'):
             commission = reward * 0.05
             referrer = await get_user(user['referrer_id'])
@@ -204,17 +206,17 @@ async def ad_completed(request: Request):
                 })
         
         logger.info(f"✅ REWARD QUEUED: user={user_id}, ₹{reward}, balance=₹{current_balance + reward:.2f}")
-        
         return JSONResponse({"success": True, "reward": reward, "queued": True})
+    
     except Exception as e:
         logger.error(f"❌ Ad webhook error: {e}")
         raise HTTPException(status_code=500)
 
 @app_fastapi.get("/health")
 async def health():
-    return {"status": "ok", "version": "9.3", "unlimited_ads": True}
+    return {"status": "ok", "version": "9.4", "unlimited_ads": True}
 
-# Bot Handlers (ALL check pending rewards first)
+# Bot Handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     
@@ -238,7 +240,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     stats = await get_user_stats(user_id)
     await update.message.reply_text(
-        f"👋 **Welcome to CashyAds v9.3!**\n\n"
+        f"👋 **Welcome to CashyAds v9.4!**\n\n"
         f"💰 **UNLIMITED Ads → NON-STOP Earnings**\n\n"
         f"💵 Balance: `₹{stats['balance']:.2f}`\n"
         f"📺 Ads: `{stats['ads_watched']}`\n"
@@ -400,27 +402,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=create_main_keyboard(), parse_mode='Markdown'
         )
 
-# Run FastAPI + Telegram Bot (FIXED async issue)
-async def run_api():
-    config = uvicorn.Config(app_fastapi, host="0.0.0.0", port=8001, log_level="info")
-    server = uvicorn.Server(config)
-    await server.serve()
+# ✅ FIXED: Run FastAPI in SEPARATE THREAD
+def run_fastapi():
+    uvicorn.run(app_fastapi, host="0.0.0.0", port=8001, log_level="info")
 
-async def main():
-    logger.info("🤖 CashyAds v9.3 - UNLIMITED ADS + BOT DM NOTIFICATIONS")
+def main():
+    logger.info("🤖 CashyAds v9.4 - UNLIMITED ADS + BOT DM NOTIFICATIONS")
     logger.info(f"🌐 Webhook: http://{VPS_IP}:8001/cashyads/ad-completed")
     logger.info(f"🌐 Health: http://{VPS_IP}:8001/health")
     logger.info(f"🌐 Mini App: {MINI_APP_URL}")
     
+    # Start FastAPI in background thread
+    api_thread = threading.Thread(target=run_fastapi, daemon=True)
+    api_thread.start()
+    
+    # Run Telegram bot (separate event loop)
     app = Application.builder().token(BOT_TOKEN).build()
     
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    # Run bot polling (API runs on separate port)
     logger.info("✅ Bot + API Running - UNLIMITED EARNINGS!")
-    await app.run_polling(drop_pending_updates=True)
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    main()
